@@ -1,10 +1,12 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
+/** Vercel 서버리스 최대 실행 시간(초). Track B 루프·외부 API 여유 */
+export const maxDuration = 60;
+
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const runtime = 'nodejs';
-export const maxDuration = 15;
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));

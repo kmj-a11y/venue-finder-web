@@ -24,6 +24,12 @@ function hasRealSummary(bid: any) {
   return true;
 }
 
+/** `<input type="month" />` 초기값 — 한국 시간 기준 오늘이 속한 달(공고 일자와 맞춤) */
+function yyyyMmKstToday() {
+  const s = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Seoul' });
+  return s.split(' ')[0].slice(0, 7);
+}
+
 /** 게시일 문자열 기준 최신순 정렬 */
 function compareBidsByNoticeDesc(a: any, b: any) {
   const da = String(a.noticeDate ?? '').replace(/\D/g, '');
@@ -104,7 +110,7 @@ export default function App() {
   const [loadingPhase, setLoadingPhase] = useState<'idle' | 'fetch'>('idle');
   const [toastMessage, setToastMessage] = useState('');
 
-  const [selectedMonth, setSelectedMonth] = useState('2026-03');
+  const [selectedMonth, setSelectedMonth] = useState(() => yyyyMmKstToday());
   const [searchKeyword, setSearchKeyword] = useState('');
   const [showSavedOnly, setShowSavedOnly] = useState(false);
   const [selectedBid, setSelectedBid] = useState<any | null>(null);
@@ -183,7 +189,7 @@ export default function App() {
     };
 
     loadInitialData();
-    handleRefresh(); 
+    handleRefresh();
   }, []);
 
   useEffect(() => {

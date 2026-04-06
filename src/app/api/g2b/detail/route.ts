@@ -1,10 +1,12 @@
 import { NextResponse } from 'next/server';
 import * as cheerio from 'cheerio';
 
+/** Vercel 서버리스 최대 실행 시간(초). 상세·첨부 스크래핑 지연 대비 */
+export const maxDuration = 60;
+
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const runtime = 'nodejs';
-export const maxDuration = 60;
 
 type Attachment = { name: string; url: string; source: 'file' | 'proposal' };
 

@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server';
 
+/** Vercel 서버리스 최대 실행 시간(초). 조달청 API 다페이지 병합 등 지연 대비 */
+export const maxDuration = 60;
+
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 

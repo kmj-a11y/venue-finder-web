@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server';
 
+/** Vercel 서버리스 최대 실행 시간(초). 공공데이터 개찰 API 지연 대비 */
+export const maxDuration = 60;
+
 function formatKoreanCurrency(amount: unknown): string {
   const n = Number(amount);
   if (amount == null || amount === '' || !Number.isFinite(n) || n < 0) return '-';
