@@ -89,7 +89,6 @@ export async function GET(request: Request) {
   try {
     let firstData: Record<string, unknown> | null = null;
     const mergedItems: Record<string, unknown>[] = [];
-    let totalCount = 0;
     let pageNo = 1;
 
     while (pageNo <= MAX_PAGES) {
@@ -159,11 +158,6 @@ export async function GET(request: Request) {
         break;
       }
 
-      const tc = parseInt(String(body.totalCount ?? 0), 10);
-      if (pageNo === 1 && Number.isFinite(tc)) {
-        totalCount = tc;
-      }
-
       const asObjects = extractItemsChunk(body);
       if (asObjects.length === 0) {
         break;
@@ -172,9 +166,6 @@ export async function GET(request: Request) {
       mergedItems.push(...asObjects);
 
       if (asObjects.length < NUM_OF_ROWS) {
-        break;
-      }
-      if (totalCount > 0 && mergedItems.length >= totalCount) {
         break;
       }
       pageNo += 1;

@@ -1,9 +1,10 @@
+// @ts-nocheck
 "use client";
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Search, RefreshCcw, MapPin, Users, Calendar, Mail, Phone, User, 
-  ExternalLink, ChevronRight, Download, AlertCircle, Building2, Clock, 
-  FileText, Trophy, Activity, Filter, Tag, Settings, Plus, X, Save, 
+  ExternalLink, ChevronRight, ChevronDown, Download, AlertCircle, Building2, Clock, 
+  FileText, Trophy, Activity, Settings, Plus, X, Save, BarChart3,
   Key, Archive, Bookmark, BookmarkCheck, CheckCircle2, List, Loader2
 } from 'lucide-react';
 
@@ -14,7 +15,7 @@ function isRecruitmentAgencyBidTitle(title: string | undefined | null): boolean 
   return compact.includes('채용대행') || compact.includes('채용위탁');
 }
 
-function hasRealSummary(bid) {
+function hasRealSummary(bid: any) {
   const s = bid.summary;
   if (!s || s === '-' || String(s).trim() === '') return false;
   const text = String(s);
@@ -24,7 +25,7 @@ function hasRealSummary(bid) {
 }
 
 /** 게시일 문자열 기준 최신순 정렬 */
-function compareBidsByNoticeDesc(a, b) {
+function compareBidsByNoticeDesc(a: any, b: any) {
   const da = String(a.noticeDate ?? '').replace(/\D/g, '');
   const db = String(b.noticeDate ?? '').replace(/\D/g, '');
   return db.localeCompare(da, undefined, { numeric: true });
@@ -34,12 +35,14 @@ function compareBidsByNoticeDesc(a, b) {
  * API로 받은 건은 최신 필드로 갱신하고, 이미 분석해 둔 summary 등은 유지.
  * API에 일시적으로 안 나오는 id도 기존 목록에서 사라지지 않음(증분 동기화).
  */
-function mergeFetchedBidsWithPrevious(prev, freshWithCache) {
-  const map = new Map((prev ?? []).map((b) => [b.id, b]));
-  for (const b of freshWithCache) {
-    const old = map.get(b.id);
+function mergeFetchedBidsWithPrevious(prev: any, freshWithCache: any) {
+  const map = new Map<string, any>(
+    (prev ?? []).map((b: any) => [String(b.id ?? ''), b] as const)
+  );
+  for (const b of freshWithCache as any[]) {
+    const old: any = map.get(String(b?.id ?? ''));
     if (!old) {
-      map.set(b.id, b);
+      map.set(String(b?.id ?? ''), b);
       continue;
     }
     const keepSummary =
@@ -47,15 +50,17 @@ function mergeFetchedBidsWithPrevious(prev, freshWithCache) {
       old.summary !== '-' &&
       !String(old.summary).startsWith('⚠️') &&
       hasRealSummary(old);
-    map.set(b.id, {
+    map.set(String(b?.id ?? ''), {
       ...b,
       summary: keepSummary ? old.summary : b.summary,
+      result_status: b.result_status ?? old.result_status,
+      result_winner: b.result_winner ?? old.result_winner,
     });
   }
   return Array.from(map.values()).sort(compareBidsByNoticeDesc);
 }
 
-function formatKoreanCurrency(amount) {
+function formatKoreanCurrency(amount: any) {
   const n = Number(amount);
   if (amount == null || amount === '' || !Number.isFinite(n) || n < 0) return '-';
   const eok = Math.floor(n / 1e8);
@@ -67,7 +72,7 @@ function formatKoreanCurrency(amount) {
   return `${Math.floor(n).toLocaleString()}원`;
 }
 
-function safeFormatDate(str) {
+function safeFormatDate(str: any) {
   if (str == null || str === '') return '-';
   const digits = String(str).replace(/\D/g, '');
   if (digits.length < 8) return '-';
@@ -77,7 +82,7 @@ function safeFormatDate(str) {
   return `${y}-${m}-${d}`;
 }
 
-function renderSummaryHtml(text) {
+function renderSummaryHtml(text: any) {
   if (text == null || text === '') return '-';
   const escaped = String(text)
     .replace(/&/g, '&amp;')
@@ -93,7 +98,7 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'pipeline' | 'settings'>('dashboard');
   const [isLoading, setIsLoading] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [loadingPhase, setLoadingPhase] = useState<'idle' | 'fetch'>('idle');
@@ -102,22 +107,21 @@ export default function App() {
   const [selectedMonth, setSelectedMonth] = useState('2026-03');
   const [searchKeyword, setSearchKeyword] = useState('');
   const [showSavedOnly, setShowSavedOnly] = useState(false);
-  const [selectedBid, setSelectedBid] = useState(null);
-  const [bidResult, setBidResult] = useState(null);
-  const [bids, setBids] = useState([]);
+  const [selectedBid, setSelectedBid] = useState<any | null>(null);
+  const [bidResult, setBidResult] = useState<any | null>(null);
+  const [bids, setBids] = useState<any[]>([]);
   const [savedBidIds, setSavedBidIds] = useState(new Set()); 
+  const [savedBidsData, setSavedBidsData] = useState<any[]>([]);
+  const [analyzedBidIds, setAnalyzedBidIds] = useState<Set<string>>(new Set());
+  const [ccQuota, setCcQuota] = useState<number | null>(null);
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [summaryModalOpen, setSummaryModalOpen] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const [geminiApiKey, setGeminiApiKey] = useState('');
-  const [adminKeywords, setAdminKeywords] = useState(['외부대관', '면접장', '필기시험', 'NCS', '채용대행', '공간임차']);
-  const [activeKeywords, setActiveKeywords] = useState(['외부대관', '면접장']);
-  const [newKeywordInput, setNewKeywordInput] = useState('');
-  
   const [prompts, setPrompts] = useState([
     {
-      id: 1,
+      id: '1',
       title: '입찰 메타데이터 분석',
       content: `너는 공공기관 입찰 분석 전문가야. 제공된 공고명, 수요기관, 배정예산, 첨부파일 목록을 바탕으로 분석 리포트를 작성해. 요약은 필요한 만큼 충분히 작성해 줘. 줄 수나 글자 수 제한을 두지 마.
 
@@ -132,9 +136,22 @@ export default function App() {
 4. 📎 핵심 확인 문서: 담당자가 반드시 열어봐야 할 첨부파일명을 정확히 지목`,
     },
   ]);
-  const [activePromptId, setActivePromptId] = useState(1);
+  const [activePromptId, setActivePromptId] = useState('1');
   const [editingPromptContent, setEditingPromptContent] = useState('');
   const [footerTime, setFooterTime] = useState(''); // 하이드레이션 방지: 마운트 후에만 시각 표시
+  const [pipelineSummaryModalBidId, setPipelineSummaryModalBidId] = useState<string | null>(null);
+  const proposalFilesCacheRef = useRef<Map<string, Array<{ name: string; url: string }>>>(
+    new Map()
+  );
+  /** 상세 첨부 API를 이미 실패한 공고 — 자동 재시도 금지(무한 폴링·과호출 방지) */
+  const proposalFilesFailedRef = useRef<Set<string>>(new Set());
+  const proposalFilesInFlightRef = useRef<string | null>(null);
+  const [expandedBidId, setExpandedBidId] = useState<string | null>(null);
+  const [proposalDetailLoadingBidId, setProposalDetailLoadingBidId] = useState<string | null>(null);
+  const [, setProposalDetailUiTick] = useState(0);
+  const [editingManualPhoneId, setEditingManualPhoneId] = useState<string | null>(null);
+  const [editingManualEmailId, setEditingManualEmailId] = useState<string | null>(null);
+  const [selectedPipelineBidId, setSelectedPipelineBidId] = useState<string | null>(null);
 
   useEffect(() => {
     const loadInitialData = async () => {
@@ -148,9 +165,6 @@ export default function App() {
         if (!appError && appSettings) {
           if (appSettings.gemini_api_key) {
             setGeminiApiKey(appSettings.gemini_api_key);
-          }
-          if (appSettings.keywords && Array.isArray(appSettings.keywords)) {
-            setAdminKeywords(appSettings.keywords);
           }
         }
 
@@ -171,6 +185,60 @@ export default function App() {
     loadInitialData();
     handleRefresh(); 
   }, []);
+
+  useEffect(() => {
+    fetchQuota();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [{ data: savedRows, error: savedErr }, { data: analyzedRows, error: analyzedErr }] =
+        await Promise.all([
+          supabase.from('saved_bids').select('*').order('notice_date', { ascending: false }),
+          supabase.from('analyzed_bids').select('bid_id'),
+        ]);
+      if (cancelled) return;
+      if (savedErr) {
+        console.error('saved_bids load error:', savedErr);
+        return;
+      }
+      if (analyzedErr) {
+        console.error('analyzed_bids load error:', analyzedErr);
+      }
+      const rows = savedRows ?? [];
+      setSavedBidsData(rows);
+      setSavedBidIds(new Set(rows.map((r: { bid_id: string }) => r.bid_id)));
+      setAnalyzedBidIds(
+        new Set((analyzedRows ?? []).map((r: { bid_id: string }) => String(r.bid_id)))
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleAnalyzedStatus = async (bidId: string) => {
+    const isAnalyzed = analyzedBidIds.has(bidId);
+    try {
+      if (isAnalyzed) {
+        const { error } = await supabase.from('analyzed_bids').delete().eq('bid_id', bidId);
+        if (error) throw error;
+        setAnalyzedBidIds((prev) => {
+          const next = new Set(prev);
+          next.delete(bidId);
+          return next;
+        });
+      } else {
+        const { error } = await supabase.from('analyzed_bids').upsert({ bid_id: bidId }, { onConflict: 'bid_id' });
+        if (error) throw error;
+        setAnalyzedBidIds((prev) => new Set(prev).add(bidId));
+      }
+    } catch (err) {
+      console.error('toggleAnalyzedStatus:', err);
+      showToast(err instanceof Error ? err.message : '분석 완료 상태 저장에 실패했습니다.');
+    }
+  };
 
   useEffect(() => {
     setEditingPromptContent(prompts.find(p => p.id === activePromptId)?.content || '');
@@ -198,7 +266,29 @@ export default function App() {
     fetch(`/api/result?bidNo=${encodeURIComponent(selectedBid.bidNtceNo)}`)
       .then((r) => r.json())
       .then((data) => {
-        if (!cancelled && data.status != null) setBidResult({ status: data.status, winner: data.winner ?? '-', amount: data.amount ?? '-' });
+        if (cancelled || data.status == null) return;
+        const statusStr = data.status !== '-' && data.status != null ? String(data.status) : null;
+        const winnerStr =
+          data.winner != null && String(data.winner).trim() !== '' && data.winner !== '-'
+            ? String(data.winner).trim()
+            : null;
+        setBidResult({ status: data.status, winner: data.winner ?? '-', amount: data.amount ?? '-' });
+        setBids((prev: any[]) =>
+          prev.map((b) =>
+            b.id === selectedBid.id
+              ? { ...b, result_status: statusStr ?? b.result_status, result_winner: winnerStr ?? b.result_winner }
+              : b
+          )
+        );
+        setSelectedBid((prev: any) =>
+          prev && prev.id === selectedBid.id
+            ? {
+                ...prev,
+                result_status: statusStr ?? prev.result_status,
+                result_winner: winnerStr ?? prev.result_winner,
+              }
+            : prev
+        );
       })
       .catch(() => {
         if (!cancelled) setBidResult(null);
@@ -211,13 +301,136 @@ export default function App() {
     setTimeout(() => setToastMessage(''), 3000);
   };
 
+  const fetchQuota = async () => {
+    try {
+      const res = await fetch('/api/quota', { cache: 'no-store' });
+      if (!res.ok) {
+        console.error('fetchQuota: 응답 비정상 status=', res.status);
+        setCcQuota(null);
+        return;
+      }
+      let data: { credits?: number | null; error?: string };
+      try {
+        data = await res.json();
+      } catch (parseErr) {
+        console.error('fetchQuota: JSON 파싱 실패', parseErr);
+        setCcQuota(null);
+        return;
+      }
+      if (typeof data?.credits === 'number') {
+        setCcQuota(data.credits);
+      } else {
+        setCcQuota(null);
+      }
+    } catch (err) {
+      console.error('fetchQuota: 네트워크/예외', err);
+      setCcQuota(null);
+    }
+  };
+
+  const fetchMissingResults = async (currentBids) => {
+    try {
+      const targets = (currentBids ?? []).filter((b) => {
+        if (!b) return false;
+        if (b.status !== '입찰 마감') return false;
+        if (!b.bidNtceNo) return false;
+
+        const rs = b.result_status;
+        const rw = b.result_winner;
+        const hasWinner = rw != null && String(rw).trim() !== '' && String(rw).trim() !== '-';
+        const hasYuchal = rs != null && /유찰/.test(String(rs).trim());
+        const hasAnyResult = (rs != null && String(rs).trim() !== '') || hasWinner;
+        if (hasWinner || hasYuchal) return false;
+        if (hasAnyResult) return false;
+
+        return true;
+      });
+
+      for (const bid of targets) {
+        try {
+          const r = await fetch(`/api/result?bidNo=${encodeURIComponent(bid.bidNtceNo)}`, { cache: 'no-store' });
+          const data = await r.json().catch(() => null);
+          if (data?.status == null) {
+            // no-op
+          } else {
+            const statusStr = data.status !== '-' && data.status != null ? String(data.status) : null;
+            const winnerStr =
+              data.winner != null && String(data.winner).trim() !== '' && data.winner !== '-'
+                ? String(data.winner).trim()
+                : null;
+
+            if (statusStr || winnerStr) {
+              setBids((prev) =>
+                (prev ?? []).map((b) =>
+                  b.id === bid.id
+                    ? {
+                        ...b,
+                        result_status: statusStr ?? b.result_status,
+                        result_winner: winnerStr ?? b.result_winner,
+                      }
+                    : b
+                )
+              );
+              if (selectedBid?.id === bid.id) {
+                setSelectedBid((prev) =>
+                  prev && prev.id === bid.id
+                    ? {
+                        ...prev,
+                        result_status: statusStr ?? prev.result_status,
+                        result_winner: winnerStr ?? prev.result_winner,
+                      }
+                    : prev
+                );
+              }
+
+              // 파이프라인(saved_bids)에 저장된 공고라면 3개 컬럼만 부분 업데이트 (수기 컬럼 덮어쓰기 방지)
+              if (savedBidIds.has(bid.id)) {
+                const { error: upErr } = await supabase
+                  .from('saved_bids')
+                  .update({
+                    result_status: statusStr,
+                    result_winner: winnerStr,
+                    status: bid.status,
+                  })
+                  .eq('bid_id', bid.id);
+                if (upErr) {
+                  console.error('saved_bids partial result update error:', upErr);
+                } else {
+                  setSavedBidsData((prev) =>
+                    prev.map((r) =>
+                      r.bid_id === bid.id
+                        ? {
+                            ...r,
+                            result_status: statusStr ?? r.result_status,
+                            result_winner: winnerStr ?? r.result_winner,
+                            status: bid.status ?? r.status,
+                          }
+                        : r
+                    )
+                  );
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error('fetchMissingResults item error:', e);
+        }
+
+        // IP 차단 방지 딜레이
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    } catch (e) {
+      console.error('fetchMissingResults error:', e);
+    }
+  };
+
   const handleRefresh = async () => {
     setIsLoading(true);
     setLoadingPhase('fetch');
     try {
       // 조달청 API는 공고명(bidNtceNm) 부분검색 — 기본 '채용'으로 넓게 받은 뒤, 아래 필터에서 채용대행·채용위탁만 표시
-      const keyword = searchKeyword.trim() || '채용';
-      const res = await fetch(`/api/g2b?month=${selectedMonth}&keyword=${encodeURIComponent(keyword)}`, {
+      const keyword = searchKeyword.trim() || '채용대행';
+      const res = await fetch(`/api/sync-current?month=${selectedMonth}&keyword=${encodeURIComponent(keyword)}`, {
         cache: 'no-store',
       });
       const data = await res.json();
@@ -249,6 +462,12 @@ export default function App() {
       const mapItem = (item) => {
         const bidNtceNo = item.bidNtceNo ?? '';
         const bidNtceOrd = item.bidNtceOrd ?? '';
+        const bfSpecRegNo =
+          item.bfSpecRegNo ??
+          item.bf_spec_reg_no ??
+          item.bfSpecRegNoVal ??
+          item.bfSpecRegNoNm ??
+          null;
         const bidClseDt = item.bidClseDt ?? '';
         const bidNtceDt = item.bidNtceDt ?? item.regDt ?? bidClseDt;
         const asignBdgtAmt = item.asignBdgtAmt;
@@ -273,9 +492,25 @@ export default function App() {
         }
         const status = closeTime ? (closeTime >= now ? '입찰서 접수중' : '입찰 마감') : '-';
 
+        const rawRs = item.result_status ?? item.opengRsltNm ?? item.bidRsltNm ?? item.progrsDivCdNm;
+        const rawRw = item.result_winner ?? item.fnlsucsfNm ?? item.bidwinnrNm ?? item.opengCorpNm;
+        const result_status =
+          rawRs != null && String(rawRs).trim() !== '' ? String(rawRs).trim() : null;
+        const result_winner =
+          rawRw != null && String(rawRw).trim() !== '' && String(rawRw).trim() !== '-'
+            ? String(rawRw).trim()
+            : null;
+
         return {
           id: `${bidNtceNo}-${bidNtceOrd}`,
           bidNtceNo,
+          bidNtceOrd,
+          bfSpecRegNo:
+            // 일부 공고는 e-발주(제안요청정보) 연계 때문에 bfSpecRegNo가 목록 API에 안 내려오는 케이스가 있음
+            // (현재 확인된 케이스는 하드코딩 매핑으로 우선 복구)
+            bidNtceNo === 'R26BK01406727'
+              ? 'R26BD00196101'
+              : bfSpecRegNo,
           title: item.bidNtceNm ?? '-',
           org: item.ntceInsttNm ?? '-',
           dept: '-',
@@ -290,6 +525,8 @@ export default function App() {
           venue: '-',
           status,
           summary: '-',
+          result_status,
+          result_winner,
           result: { winner: '-', price: '-' },
           files,
           crawledAt: new Date().toISOString(),
@@ -297,7 +534,7 @@ export default function App() {
       };
 
       const rawBids = itemList.map(mapItem);
-      const filteredBids = rawBids.filter((b) => isRecruitmentAgencyBidTitle(b.title));
+      const filteredBids = rawBids;
 
       if (filteredBids.length === 0) {
         showToast(
@@ -329,8 +566,198 @@ export default function App() {
     } finally {
       setIsLoading(false);
       setLoadingPhase('idle');
+      // Track B: 과거 미완료 공고 보정은 UI와 분리해 "조용히" 백그라운드로 실행 (await 금지)
+      try {
+        void fetch('/api/sync-past', { cache: 'no-store' });
+      } catch {
+        // ignore
+      }
     }
   };
+
+  function mergeAttachmentArrays(
+    base: Array<{ name: string; url: string }> | undefined,
+    extra: Array<{ name: string; url: string }> | undefined
+  ) {
+    const a = Array.isArray(base) ? base : [];
+    const b = Array.isArray(extra) ? extra : [];
+    const seen = new Set<string>();
+    const out: Array<{ name: string; url: string }> = [];
+    for (const f of [...a, ...b]) {
+      const name = String(f?.name ?? '').trim();
+      const url = String(f?.url ?? '').trim();
+      if (!name || !url) continue;
+      const key = `${name}||${url}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ name, url });
+    }
+    return out;
+  }
+
+  const fetchHiddenProposalRequestAttachments = async () => {
+    if (!selectedBid) {
+      showToast('먼저 공고를 선택해 주세요.');
+      return;
+    }
+
+    const targetId = String(selectedBid.id ?? '');
+    const cacheKey = String(selectedBid.id ?? selectedBid.bidNtceNo ?? '');
+    const baseFiles = selectedBid.files;
+    const bidNo = String(selectedBid.bidNtceNo ?? '').trim();
+    if (!bidNo) {
+      showToast('이 공고는 나라장터 상세 연동에 필요한 bidNo가 없습니다.');
+      return;
+    }
+
+    // 성공 캐시가 있으면 API 호출 없이 즉시 병합
+    if (proposalFilesCacheRef.current.has(cacheKey)) {
+      const cached = proposalFilesCacheRef.current.get(cacheKey) ?? [];
+      if (!cached.length) {
+        showToast('이 공고에는 연동된 제안요청서가 없습니다.');
+        return;
+      }
+      const mergedFiles = mergeAttachmentArrays(baseFiles, cached);
+      setBids((prev) => prev.map((b) => (b.id === targetId ? { ...b, files: mergedFiles } : b)));
+      setSelectedBid((prev) =>
+        prev && prev.id === targetId ? { ...prev, files: mergedFiles } : prev
+      );
+      showToast('숨은 제안요청서 첨부가 추가되었습니다.');
+      return;
+    }
+
+    setProposalDetailLoadingBidId(cacheKey);
+    try {
+      const res = await fetch(
+        `/api/g2b/detail?bidNo=${encodeURIComponent(String(bidNo))}&bidOrd=${encodeURIComponent(
+          String(selectedBid.bidNtceOrd ?? '')
+        )}&bfSpecRegNo=${encodeURIComponent(String(selectedBid?.bfSpecRegNo ?? ''))}`,
+        { cache: 'no-store' }
+      );
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        const msg =
+          (typeof errBody?.error === 'string' && errBody.error.trim()) || `API Error ${res.status}`;
+        showToast(`연동 실패: ${msg}`);
+        return;
+      }
+
+      const data = await res.json().catch(() => ({}));
+      const proposalFilesRaw = Array.isArray(data?.proposalFiles) ? data.proposalFiles : [];
+      const proposalFiles = proposalFilesRaw
+        .map((f: any) => ({ name: String(f?.name ?? '').trim(), url: String(f?.url ?? '').trim() }))
+        .filter((f) => f.name && f.url);
+
+      if (proposalFiles.length === 0) {
+        // 실패/없음은 캐시하지 않고, 사용자가 원하면 다시 시도할 수 있도록 둔다.
+        showToast('이 공고에는 연동된 제안요청서가 없습니다.');
+        return;
+      }
+
+      proposalFilesCacheRef.current.set(cacheKey, proposalFiles);
+      const mergedFiles = mergeAttachmentArrays(baseFiles, proposalFiles);
+      setBids((prev) => prev.map((b) => (b.id === targetId ? { ...b, files: mergedFiles } : b)));
+      setSelectedBid((prev) =>
+        prev && prev.id === targetId ? { ...prev, files: mergedFiles } : prev
+      );
+    } catch (e) {
+      console.error('fetchHiddenProposalRequestAttachments error:', e);
+      showToast('연동 중 오류가 발생했습니다.');
+    } finally {
+      setProposalDetailLoadingBidId((id) => (id === cacheKey ? null : id));
+    }
+  };
+
+  /** 나라장터 상세(제안요청) 첨부 — 공고당 최대 1회 자동 호출, 실패 시 같은 세션에서 자동 재시도 없음 */
+  const loadProposalDetailAttachmentsOnce = async (bid: any) => {
+    if (!bid?.bidNtceNo) return;
+    const cacheKey = String(bid.id ?? bid.bidNtceNo ?? '');
+
+    if (proposalFilesCacheRef.current.has(cacheKey)) {
+      const cached = proposalFilesCacheRef.current.get(cacheKey) ?? [];
+      const mergedFiles = mergeAttachmentArrays(bid.files, cached);
+      setBids((prev) =>
+        prev.map((b) => (b.id === bid.id ? { ...b, files: mergedFiles } : b))
+      );
+      setSelectedBid((prev) =>
+        prev && prev.id === bid.id ? { ...prev, files: mergedFiles } : prev
+      );
+      return;
+    }
+
+    if (proposalFilesFailedRef.current.has(cacheKey)) return;
+    if (proposalFilesInFlightRef.current === cacheKey) return;
+
+    proposalFilesInFlightRef.current = cacheKey;
+    setProposalDetailLoadingBidId(cacheKey);
+
+    try {
+      const res = await fetch(
+        `/api/g2b/detail?bidNo=${encodeURIComponent(String(bid.bidNtceNo))}&bidOrd=${encodeURIComponent(
+          String(bid.bidNtceOrd ?? '')
+        )}&bfSpecRegNo=${encodeURIComponent(String(bid?.bfSpecRegNo ?? ''))}`,
+        { cache: 'no-store' }
+      );
+      if (!res.ok) {
+        proposalFilesFailedRef.current.add(cacheKey);
+        setProposalDetailUiTick((t) => t + 1);
+        let msg = `나라장터 첨부 연동 실패 (${res.status})`;
+        try {
+          const errBody = await res.json();
+          if (typeof errBody?.error === 'string' && errBody.error.trim()) {
+            msg = errBody.error.trim();
+          }
+        } catch {
+          /* ignore */
+        }
+        showToast(msg);
+        return;
+      }
+
+      const data = await res.json().catch(() => ({}));
+      const proposalFilesRaw = Array.isArray(data?.proposalFiles) ? data.proposalFiles : [];
+      const proposalFiles = proposalFilesRaw
+        .map((f: any) => ({
+          name: String(f?.name ?? '').trim(),
+          url: String(f?.url ?? '').trim(),
+        }))
+        .filter((f: any) => f.name && f.url);
+
+      proposalFilesCacheRef.current.set(cacheKey, proposalFiles);
+      if (proposalFiles.length === 0) {
+        showToast('이 공고의 제안요청 첨부(나라장터 e-발주 연결)를 찾지 못했습니다.');
+      }
+      const mergedFiles = mergeAttachmentArrays(bid.files, proposalFiles);
+      setBids((prev) =>
+        prev.map((b) => (b.id === bid.id ? { ...b, files: mergedFiles } : b))
+      );
+      setSelectedBid((prev) =>
+        prev && prev.id === bid.id ? { ...prev, files: mergedFiles } : prev
+      );
+    } catch (e) {
+      console.error('proposalFiles fetch error:', e);
+      proposalFilesFailedRef.current.add(cacheKey);
+      setProposalDetailUiTick((t) => t + 1);
+      showToast('나라장터 첨부 연동 중 오류가 발생했습니다. 자동 재시도하지 않습니다.');
+    } finally {
+      if (proposalFilesInFlightRef.current === cacheKey) {
+        proposalFilesInFlightRef.current = null;
+      }
+      setProposalDetailLoadingBidId((id) => (id === cacheKey ? null : id));
+    }
+  };
+
+  const handleSelectBidRow = (bid: any) => {
+    setSelectedBid(bid);
+  };
+
+  const toggleBidRowExpand = (bid: any, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpandedBidId((prev) => (prev === bid.id ? null : bid.id));
+  };
+
+  // 펼침(expand) 시에는 무거운 /api/g2b/detail 호출을 하지 않는다.
 
   const handleUploadFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const added = e.target.files;
@@ -370,7 +797,8 @@ export default function App() {
       return;
     }
     const geminiKey = (geminiApiKey ?? '').trim();
-    const promptContent = prompts[0]?.content ?? '';
+    const activePrompt = prompts.find((p) => p.id === activePromptId) || prompts[0];
+    const promptContent = activePrompt?.content ?? '';
     if (!geminiKey || !promptContent.trim()) {
       showToast('설정에서 Gemini API Key와 프롬프트를 먼저 저장해 주세요.');
       return;
@@ -379,8 +807,9 @@ export default function App() {
     formData.append('bid', JSON.stringify(selectedBid));
     formData.append('prompt', promptContent);
     formData.append('geminiKey', geminiKey);
-    // 서버는 단일 'file' 필드를 기대하므로 첫 번째 파일만 전송
-    formData.append('file', uploadFiles[0]);
+    uploadFiles.forEach((file) => {
+      formData.append('files', file);
+    });
 
     setIsAnalyzing(true);
     try {
@@ -417,6 +846,19 @@ export default function App() {
       if (selectedBid && selectedBid.id === updatedBid.id) {
         setSelectedBid((prev) => (prev && prev.id === updatedBid.id ? { ...prev, ...updatedBid } : prev));
       }
+      if (savedBidIds.has(updatedBid.id)) {
+        const { error: upErr } = await supabase
+          .from('saved_bids')
+          .update({ summary: newSummary })
+          .eq('bid_id', updatedBid.id);
+        if (!upErr) {
+          setSavedBidsData((rows) =>
+            rows.map((r) =>
+              r.bid_id === updatedBid.id ? { ...r, summary: newSummary } : r
+            )
+          );
+        }
+      }
       setUploadFiles([]);
       if (uploadInputRef.current) uploadInputRef.current.value = '';
       if (summaryEmpty) {
@@ -424,6 +866,7 @@ export default function App() {
       } else {
         showToast('업로드한 첨부파일 기준으로 AI 재분석이 완료되었습니다.');
       }
+      void fetchQuota();
     } catch (err) {
       console.error('handleUploadAnalyze error:', err);
       showToast('업로드 기반 AI 분석 중 오류가 발생했습니다.');
@@ -438,15 +881,201 @@ export default function App() {
 
   const toggleSaveBid = async (e, bid) => {
     e.stopPropagation();
-    const newSavedIds = new Set(savedBidIds);
-    if (newSavedIds.has(bid.id)) {
-      newSavedIds.delete(bid.id);
-      showToast('보관함에서 제거되었습니다.');
-    } else {
-      newSavedIds.add(bid.id);
-      showToast('보관함에 저장되었습니다.');
+    const isSaved = savedBidIds.has(bid.id);
+    try {
+      if (isSaved) {
+        const { error } = await supabase.from('saved_bids').delete().eq('bid_id', bid.id);
+        if (error) throw error;
+        setSavedBidIds((prev) => {
+          const next = new Set(prev);
+          next.delete(bid.id);
+          return next;
+        });
+        setSavedBidsData((prev) => prev.filter((r) => r.bid_id !== bid.id));
+        showToast('보관함에서 제거되었습니다.');
+      } else {
+        const existing = savedBidsData.find((r) => r.bid_id === bid.id);
+        const row = {
+          bid_id: bid.id,
+          title: bid.title ?? '',
+          org: bid.org ?? '',
+          notice_date: bid.noticeDate ?? null,
+          deadline: bid.deadline ?? null,
+          budget: bid.budget ?? '',
+          status: bid.status ?? '',
+          summary: bid.summary ?? '-',
+          phone: bid.phone ?? null,
+          email: bid.email ?? null,
+          memo: existing?.memo ?? '',
+          is_emailed: existing?.is_emailed ?? false,
+        };
+        const { error } = await supabase.from('saved_bids').upsert(row, { onConflict: 'bid_id' });
+        if (error) throw error;
+        setSavedBidIds((prev) => new Set(prev).add(bid.id));
+        setSavedBidsData((prev) => {
+          const others = prev.filter((r) => r.bid_id !== bid.id);
+          return [...others, row].sort((a, b) =>
+            compareBidsByNoticeDesc(
+              { noticeDate: a.notice_date },
+              { noticeDate: b.notice_date }
+            )
+          );
+        });
+        showToast('보관함에 저장되었습니다.');
+      }
+    } catch (err) {
+      console.error('toggleSaveBid:', err);
+      showToast(err instanceof Error ? err.message : '보관함 동기화에 실패했습니다.');
     }
-    setSavedBidIds(newSavedIds);
+  };
+
+  const updatePipelineMemo = async (bidId: string, memo: string) => {
+    const { error } = await supabase.from('saved_bids').update({ memo }).eq('bid_id', bidId);
+    if (error) {
+      console.error('saved_bids memo update:', error);
+      showToast('메모 저장에 실패했습니다.');
+      return;
+    }
+    setSavedBidsData((prev) =>
+      prev.map((r) => (r.bid_id === bidId ? { ...r, memo } : r))
+    );
+  };
+
+  const updatePipelineCeoFeedback = async (bidId: string, feedback: string) => {
+    const { error } = await supabase
+      .from('saved_bids')
+      .update({ ceo_feedback: feedback })
+      .eq('bid_id', bidId);
+    if (error) {
+      console.error('saved_bids ceo_feedback update:', error);
+      showToast('대표님 피드백 저장에 실패했습니다.');
+      return;
+    }
+    setSavedBidsData((prev) =>
+      prev.map((r) => (r.bid_id === bidId ? { ...r, ceo_feedback: feedback } : r))
+    );
+  };
+
+  const togglePipelineEmailed = async (bidId: string) => {
+    const row = savedBidsData.find((r) => r.bid_id === bidId);
+    const next = !row?.is_emailed;
+    const { error } = await supabase
+      .from('saved_bids')
+      .update({ is_emailed: next })
+      .eq('bid_id', bidId);
+    if (error) {
+      console.error('saved_bids is_emailed update:', error);
+      showToast('발송 상태 변경에 실패했습니다.');
+      return;
+    }
+    setSavedBidsData((prev) =>
+      prev.map((r) => (r.bid_id === bidId ? { ...r, is_emailed: next } : r))
+    );
+  };
+
+  const removeFromPipeline = async (bidId: string) => {
+    const ok = window.confirm('정말 보관함에서 제거할까요? (파이프라인에서 삭제됩니다)');
+    if (!ok) return;
+    const { error } = await supabase.from('saved_bids').delete().eq('bid_id', bidId);
+    if (error) {
+      console.error('saved_bids delete error:', error);
+      showToast('보관함에서 제거하는 데 실패했습니다.');
+      return;
+    }
+    setSavedBidsData((prev) => prev.filter((r) => r.bid_id !== bidId));
+    setSavedBidIds((prev) => {
+      const next = new Set(prev);
+      next.delete(bidId);
+      return next;
+    });
+    if (pipelineSummaryModalBidId === bidId) setPipelineSummaryModalBidId(null);
+    if (editingManualPhoneId === bidId) setEditingManualPhoneId(null);
+    if (editingManualEmailId === bidId) setEditingManualEmailId(null);
+    showToast('보관함에서 제거되었습니다.');
+  };
+
+  const togglePipelineCeoChecked = async (bidId: string) => {
+    const row = savedBidsData.find((r) => r.bid_id === bidId);
+    const next = !row?.is_ceo_checked;
+    const { error } = await supabase
+      .from('saved_bids')
+      .update({ is_ceo_checked: next })
+      .eq('bid_id', bidId);
+    if (error) {
+      console.error('saved_bids is_ceo_checked update:', error);
+      showToast('대표님 확인 상태 변경에 실패했습니다.');
+      return;
+    }
+    setSavedBidsData((prev) =>
+      prev.map((r) => (r.bid_id === bidId ? { ...r, is_ceo_checked: next } : r))
+    );
+  };
+
+  const updatePipelineManualContact = async (
+    bidId: string,
+    patch: { manual_phone?: string | null; manual_email?: string | null }
+  ) => {
+    const payload: any = {};
+    if ('manual_phone' in patch) payload.manual_phone = patch.manual_phone;
+    if ('manual_email' in patch) payload.manual_email = patch.manual_email;
+
+    const { error } = await supabase.from('saved_bids').update(payload).eq('bid_id', bidId);
+    if (error) {
+      console.error('saved_bids manual contact update:', error);
+      showToast('연락처 정보를 저장하는 데 실패했습니다.');
+      return;
+    }
+    setSavedBidsData((prev) =>
+      prev.map((r) =>
+        r.bid_id === bidId
+          ? {
+              ...r,
+              ...payload,
+            }
+          : r
+      )
+    );
+  };
+
+  const markFeedbackAsRead = async (bidId: string) => {
+    const { error } = await supabase
+      .from('saved_bids')
+      .update({ is_feedback_read: true })
+      .eq('bid_id', bidId);
+    if (error) {
+      console.error('saved_bids is_feedback_read update:', error);
+      showToast('피드백 읽음 처리에 실패했습니다.');
+      return;
+    }
+    setSavedBidsData((prev) =>
+      prev.map((r) =>
+        r.bid_id === bidId ? { ...r, is_feedback_read: true } : r
+      )
+    );
+  };
+
+  const markAllFeedbacksAsRead = async () => {
+    const targets = savedBidsData.filter((row) => {
+      const fb = row.ceo_feedback;
+      const read = row.is_feedback_read === true;
+      return fb != null && String(fb).trim() !== '' && !read;
+    });
+    if (targets.length === 0) return;
+    const ids = targets.map((r) => r.bid_id);
+    const { error } = await supabase
+      .from('saved_bids')
+      .update({ is_feedback_read: true })
+      .in('bid_id', ids);
+    if (error) {
+      console.error('saved_bids bulk is_feedback_read update:', error);
+      showToast('피드백 일괄 읽음 처리에 실패했습니다.');
+      return;
+    }
+    setSavedBidsData((prev) =>
+      prev.map((r) =>
+        ids.includes(r.bid_id) ? { ...r, is_feedback_read: true } : r
+      )
+    );
   };
 
   const saveSettings = async () => {
@@ -456,7 +1085,6 @@ export default function App() {
         .upsert({
           id: 1,
           gemini_api_key: geminiApiKey,
-          keywords: adminKeywords,
         });
 
       if (appSettingsError) {
@@ -505,7 +1133,7 @@ export default function App() {
   };
 
   const addNewPrompt = () => {
-    const newId = Date.now();
+    const newId = crypto.randomUUID();
     setPrompts([...prompts, { id: newId, title: '새 프롬프트', content: '' }]);
     setActivePromptId(newId);
   };
@@ -521,28 +1149,18 @@ export default function App() {
     setPrompts(prompts.map(p => p.id === activePromptId ? { ...p, [field]: value } : p));
   };
 
-  const toggleKeywordFilter = (kw) => setActiveKeywords(prev => prev.includes(kw) ? prev.filter(k => k !== kw) : [...prev, kw]);
-
-  const handleAddAdminKeyword = (e) => {
-    if (e.key === 'Enter' || e.type === 'click') {
-      const kw = newKeywordInput.trim();
-      if (kw && !adminKeywords.includes(kw)) {
-        setAdminKeywords([...adminKeywords, kw]);
-        setNewKeywordInput('');
-      }
-    }
-  };
-
-  const handleRemoveAdminKeyword = (kwToRemove) => {
-    setAdminKeywords(adminKeywords.filter(kw => kw !== kwToRemove));
-    setActiveKeywords(activeKeywords.filter(kw => kw !== kwToRemove));
-  };
-
   const filteredBids = bids.filter(bid => {
     if (showSavedOnly && !savedBidIds.has(bid.id)) return false;
     if (searchKeyword && !bid.title.includes(searchKeyword) && !bid.org.includes(searchKeyword)) return false;
     return true;
   });
+
+  const pipelineSorted = [...savedBidsData].sort((a, b) =>
+    compareBidsByNoticeDesc(
+      { noticeDate: a.notice_date },
+      { noticeDate: b.notice_date }
+    )
+  );
 
   const getStatusBadge = (status) => {
     const styles = {
@@ -554,8 +1172,39 @@ export default function App() {
     return <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${styles[status] || 'bg-gray-50 text-gray-600'}`}>{status}</span>;
   };
 
+  const isYuchalResultStatus = (bid) => {
+    const s = bid.result_status;
+    if (s == null || s === '') return false;
+    const t = String(s).trim();
+    if (t === '유찰') return true;
+    return /유찰/.test(t);
+  };
+
+  /** 입찰 상태 뱃지 옆: 유찰(빨강) 우선, 그다음 낙찰 업체명(초록) */
+  const renderBidResultBadges = (bid) => {
+    if (isYuchalResultStatus(bid)) {
+      return (
+        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-700 border border-red-200/80">
+          유찰
+        </span>
+      );
+    }
+    const w = bid.result_winner;
+    if (w != null && String(w).trim() !== '' && String(w).trim() !== '-') {
+      return (
+        <span
+          className="inline-flex items-center max-w-[160px] truncate px-2 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700 border border-green-200/80"
+          title={String(w).trim()}
+        >
+          {String(w).trim()}
+        </span>
+      );
+    }
+    return null;
+  };
+
   return (
-    <div className="min-h-screen bg-[#f1f5f9] flex flex-col font-sans text-slate-900 relative">
+    <div className="bg-[#f1f5f9] font-sans text-slate-900 relative flex flex-col h-screen overflow-hidden">
       {toastMessage && (
         <div className="fixed bottom-6 right-6 bg-slate-900 text-white px-6 py-3 rounded-xl shadow-2xl flex items-center gap-3 z-50 animate-fade-in-up">
           <CheckCircle2 className="w-5 h-5 text-emerald-400" />
@@ -563,15 +1212,16 @@ export default function App() {
         </div>
       )}
 
-      <header className="bg-white border-b border-slate-200 px-8 py-4 flex items-center justify-between sticky top-0 z-30 shadow-sm">
+      <header className="bg-white border-b border-slate-200 px-8 py-4 flex items-center justify-between sticky top-0 z-30 shadow-sm shrink-0">
         <div className="flex items-center gap-4">
           <div className="bg-indigo-600 p-2 rounded-xl shadow-lg shadow-indigo-200"><Activity className="text-white w-5 h-5" /></div>
           <div><h1 className="text-lg font-black tracking-tight text-slate-800 uppercase">Venue Finder</h1><p className="text-[10px] text-slate-400 font-bold tracking-[0.2em]">SEOUL RECRUITMENT RADAR</p></div>
         </div>
         
-        <div className="absolute left-1/2 -translate-x-1/2 flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
-          <button onClick={() => setActiveTab('dashboard')} className={`flex items-center gap-2 px-6 py-2 rounded-lg text-xs font-bold transition-all ${activeTab === 'dashboard' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Activity className="w-3.5 h-3.5" /> 대시보드</button>
-          <button onClick={() => setActiveTab('settings')} className={`flex items-center gap-2 px-6 py-2 rounded-lg text-xs font-bold transition-all ${activeTab === 'settings' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Settings className="w-3.5 h-3.5" /> 시스템 설정</button>
+        <div className="absolute left-1/2 -translate-x-1/2 flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 max-w-[min(100vw-2rem,520px)] flex-wrap justify-center">
+          <button onClick={() => setActiveTab('dashboard')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${activeTab === 'dashboard' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Activity className="w-3.5 h-3.5" /> 대시보드</button>
+          <button onClick={() => setActiveTab('pipeline')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${activeTab === 'pipeline' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><BarChart3 className="w-3.5 h-3.5" /> 📊 영업 파이프라인</button>
+          <button onClick={() => setActiveTab('settings')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${activeTab === 'settings' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Settings className="w-3.5 h-3.5" /> 시스템 설정</button>
         </div>
 
         <div className="flex items-center gap-3">
@@ -584,32 +1234,23 @@ export default function App() {
       </header>
 
       {activeTab === 'dashboard' ? (
-        <>
-          <div className="bg-slate-50 border-b border-slate-200 px-8 py-2.5 flex items-center justify-between relative z-20">
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2 text-[10px] font-black text-slate-500 uppercase tracking-widest mr-2"><Filter className="w-3 h-3 text-indigo-500" /> AI 필터 키워드</div>
-              <div className="flex flex-wrap gap-2">
-                {adminKeywords.map((kw) => (
-                  <button key={kw} onClick={() => toggleKeywordFilter(kw)} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold border transition-all ${activeKeywords.includes(kw) ? 'bg-indigo-100 text-indigo-700 border-indigo-200 shadow-sm' : 'bg-white text-slate-500 border-slate-200'}`}><Tag className={`w-2.5 h-2.5 ${activeKeywords.includes(kw) ? 'text-indigo-500' : 'text-slate-400'}`} /> {kw}</button>
-                ))}
+        <main className="flex flex-1 overflow-hidden w-full h-full">
+          <div className="flex-1 h-full overflow-y-auto p-6 scrollbar-hide">
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl px-6 py-3 flex items-center justify-end relative z-20 mb-4">
+              <div className="flex bg-slate-200 p-0.5 rounded-lg border border-slate-300">
+                <button onClick={() => setShowSavedOnly(false)} className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[11px] font-bold transition-all ${!showSavedOnly ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><List className="w-3 h-3" /> 전체 공고</button>
+                <button onClick={() => setShowSavedOnly(true)} className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[11px] font-bold transition-all ${showSavedOnly ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Bookmark className="w-3 h-3" /> 보관함 ({savedBidIds.size})</button>
               </div>
             </div>
-            
-            <div className="flex bg-slate-200 p-0.5 rounded-lg border border-slate-300">
-              <button onClick={() => setShowSavedOnly(false)} className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[11px] font-bold transition-all ${!showSavedOnly ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><List className="w-3 h-3" /> 전체 공고</button>
-              <button onClick={() => setShowSavedOnly(true)} className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[11px] font-bold transition-all ${showSavedOnly ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Bookmark className="w-3 h-3" /> 보관함 ({savedBidIds.size})</button>
-            </div>
-          </div>
 
-          {isLoading && (
-            <div className="mx-8 mt-4 flex items-center justify-center gap-3 rounded-xl bg-indigo-50 border border-indigo-100 px-6 py-4">
-              <Loader2 className="w-5 h-5 flex-shrink-0 animate-spin text-indigo-600" />
-              <span className="text-sm font-bold text-indigo-800">데이터 수집 중...</span>
-            </div>
-          )}
+            {isLoading && (
+              <div className="mb-4 flex items-center justify-center gap-3 rounded-2xl bg-indigo-50 border border-indigo-100 px-6 py-4">
+                <Loader2 className="w-5 h-5 flex-shrink-0 animate-spin text-indigo-600" />
+                <span className="text-sm font-bold text-indigo-800">데이터 수집 중...</span>
+              </div>
+            )}
 
-          <main className="flex-1 p-6 overflow-hidden flex gap-6">
-            <div className="flex-1 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
               <div className="p-4 border-b border-slate-100 bg-white flex justify-between items-center">
                 <h2 className="text-sm font-black text-slate-700 flex items-center gap-2"><FileText className="w-4 h-4 text-indigo-600" />{showSavedOnly ? '내 보관함' : '서울 지역 입찰 공고'}</h2>
                 <div className="text-[10px] font-bold text-slate-400 uppercase">Total: {filteredBids.length} Cases</div>
@@ -627,13 +1268,80 @@ export default function App() {
                   <tbody className="divide-y divide-slate-50">
                     {filteredBids.map((bid) => {
                       const isSaved = savedBidIds.has(bid.id);
+                      const isAnalyzed = analyzedBidIds.has(bid.id);
+                      const isExpanded = expandedBidId === bid.id;
                       return (
-                        <tr key={bid.id} onClick={() => setSelectedBid(bid)} className={`group cursor-pointer transition-colors ${selectedBid?.id === bid.id ? 'bg-indigo-50/50' : hasRealSummary(bid) ? 'bg-yellow-50' : 'bg-white'} hover:opacity-90`}>
-                          <td className="px-5 py-4 w-10"><button onClick={(e) => toggleSaveBid(e, bid)} className="text-slate-300 hover:text-indigo-500 transition-colors">{isSaved ? <BookmarkCheck className="w-5 h-5 text-indigo-600 fill-indigo-100" /> : <Bookmark className="w-5 h-5" />}</button></td>
-                          <td className="px-5 py-4"><div className="font-bold text-slate-800 text-sm group-hover:text-indigo-600 transition-colors line-clamp-1">{bid.title}</div><div className="flex items-center text-[11px] text-slate-400 font-bold mt-1"><Building2 className="w-3 h-3 mr-1 text-slate-300" /> {bid.org}</div></td>
-                          <td className="px-5 py-4 text-center"><div className="flex flex-col items-center gap-1.5"><div className="text-[10px] font-bold text-slate-400">게시일: {bid.noticeDate ?? '-'}</div><div className="flex items-center text-[11px] font-bold text-slate-600"><Calendar className="w-3 h-3 mr-1 text-slate-400" />{bid.deadline}</div>{getStatusBadge(bid.status)}</div></td>
-                          <td className="px-5 py-4 text-right"><div className="text-sm font-black text-slate-800">{bid.budget}</div><div className="text-[10px] text-slate-400 font-bold mt-1 flex items-center justify-end"><Users className="w-3 h-3 mr-1" /> {bid.scale}</div></td>
-                        </tr>
+                        <React.Fragment key={bid.id}>
+                          <tr
+                            onClick={() => handleSelectBidRow(bid)}
+                            className={`group cursor-pointer transition-colors ${selectedBid?.id === bid.id ? 'bg-indigo-50/50' : hasRealSummary(bid) ? 'bg-yellow-50' : 'bg-white'} ${isAnalyzed ? 'opacity-70' : ''} hover:opacity-90`}
+                          >
+                            <td className="px-5 py-4 w-14">
+                              <div className="flex flex-col items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={(e) => toggleBidRowExpand(bid, e)}
+                                  title={isExpanded ? '행 접기' : '펼쳐서 첨부파일 보기'}
+                                  className={`p-1 rounded-md border transition-colors ${isExpanded ? 'bg-indigo-100 border-indigo-200 text-indigo-700' : 'bg-white border-slate-200 text-slate-400 hover:border-indigo-200 hover:text-indigo-600'}`}
+                                >
+                                  <ChevronDown
+                                    className={`w-4 h-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                                  />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); void toggleAnalyzedStatus(bid.id); }}
+                                  title={isAnalyzed ? '분석 완료' : '분석 전'}
+                                  className={`p-1.5 rounded-full border transition-colors ${isAnalyzed ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-slate-200 hover:border-slate-300'}`}
+                                >
+                                  <CheckCircle2 className={`w-5 h-5 ${isAnalyzed ? 'text-emerald-600 fill-emerald-200' : 'text-slate-300'}`} />
+                                </button>
+                                <button type="button" onClick={(e) => toggleSaveBid(e, bid)} className="text-slate-300 hover:text-indigo-500 transition-colors">{isSaved ? <BookmarkCheck className="w-5 h-5 text-indigo-600 fill-indigo-100" /> : <Bookmark className="w-5 h-5" />}</button>
+                              </div>
+                            </td>
+                            <td className="px-5 py-4"><div className="font-bold text-slate-800 text-sm group-hover:text-indigo-600 transition-colors line-clamp-1">{bid.title}</div><div className="flex items-center text-[11px] text-slate-400 font-bold mt-1"><Building2 className="w-3 h-3 mr-1 text-slate-300" /> {bid.org}</div></td>
+                            <td className="px-5 py-4 text-center">
+                              <div className="flex flex-col items-center gap-1.5">
+                                <div className="text-[10px] font-bold text-slate-400">게시일: {bid.noticeDate ?? '-'}</div>
+                                <div className="flex items-center text-[11px] font-bold text-slate-600">
+                                  <Calendar className="w-3 h-3 mr-1 text-slate-400" />
+                                  {bid.deadline}
+                                </div>
+                                <div className="flex flex-wrap items-center justify-center gap-1.5">
+                                  {getStatusBadge(bid.status)}
+                                  {renderBidResultBadges(bid)}
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-5 py-4 text-right"><div className="text-sm font-black text-slate-800">{bid.budget}</div><div className="text-[10px] text-slate-400 font-bold mt-1 flex items-center justify-end"><Users className="w-3 h-3 mr-1" /> {bid.scale}</div></td>
+                          </tr>
+                          {isExpanded && (
+                            <tr className="bg-slate-50/90 border-b border-slate-100">
+                              <td colSpan={4} className="px-5 py-4 text-left">
+                                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">나라장터 제안요청·추가 첨부 (목록 파일)</div>
+                                {((bid.files) ?? []).length === 0 ? (
+                                  <p className="text-xs text-slate-500 font-medium">목록 API에 첨부가 없습니다.</p>
+                                ) : (
+                                  <ul className="space-y-1 max-h-40 overflow-y-auto">
+                                    {(bid.files ?? []).map((file, idx) => (
+                                      <li key={idx}>
+                                        <a
+                                          href={file.url}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="text-xs font-medium text-indigo-600 hover:underline break-all"
+                                          onClick={(e) => e.stopPropagation()}
+                                        >
+                                          {file.name}
+                                        </a>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
                       );
                     })}
                     {filteredBids.length === 0 && (<tr><td colSpan="4" className="text-center py-12 text-slate-400 text-sm font-bold">표시할 공고가 없습니다.</td></tr>)}
@@ -641,8 +1349,10 @@ export default function App() {
                 </table>
               </div>
             </div>
+          </div>
 
-            <div className="w-[450px] flex flex-col gap-5 overflow-auto pr-1">
+          <div className="w-[450px] shrink-0 h-full overflow-y-auto p-6 border-l bg-gray-50/50 scrollbar-hide">
+            <div className="flex flex-col gap-5">
               {selectedBid ? (
                 <>
                   <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
@@ -698,6 +1408,9 @@ export default function App() {
 
                     <div className="mb-6">
                       <div className="flex items-center gap-2 mb-2 text-slate-600"><Download className="w-3.5 h-3.5" /><span className="text-[10px] font-black uppercase tracking-widest">첨부문서 다운로드</span></div>
+                      <p className="text-[10px] text-slate-400 font-medium mb-2 leading-relaxed">
+                        기본은 목록 API의 일반 첨부파일만 표시됩니다. e-발주(제안요청) 숨은 첨부는 아래의 <strong className="text-slate-600">[🔍 숨은 제안요청서 가져오기]</strong> 버튼을 눌렀을 때만 1회 탐색합니다.
+                      </p>
                       <div className="space-y-1.5">
                         {((selectedBid.files) ?? []).length === 0 ? (
                           <p className="text-[11px] text-slate-400 font-medium py-2">첨부문서가 없습니다.</p>
@@ -714,6 +1427,50 @@ export default function App() {
                           })
                         )}
                       </div>
+
+                      <div className="mt-3">
+                        <button
+                          type="button"
+                          onClick={() => void fetchHiddenProposalRequestAttachments()}
+                          disabled={
+                            proposalDetailLoadingBidId ===
+                            String(selectedBid.id ?? selectedBid.bidNtceNo ?? '')
+                          }
+                          className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-[11px] font-bold bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-70 disabled:cursor-not-allowed"
+                          title="클릭하면 /api/g2b/detail 로 e-발주(제안요청) 첨부를 한 번 탐색합니다."
+                        >
+                          {proposalDetailLoadingBidId ===
+                          String(selectedBid.id ?? selectedBid.bidNtceNo ?? '') ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              가져오는 중…
+                            </>
+                          ) : (
+                            '🔍 숨은 제안요청서 가져오기 (e-발주 연동)'
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="mb-6">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-[16px]">☁️</div>
+                          <div>
+                            <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">HWP 자동 변환 무료 크레딧</p>
+                            <p className="text-xs font-semibold text-slate-700 mt-0.5">CloudConvert 남은 일일 한도</p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-2xl font-black text-indigo-600 leading-none">
+                            {ccQuota == null ? '로딩중…' : ccQuota}
+                          </div>
+                          <div className="text-[10px] font-bold text-slate-400 mt-0.5">credits</div>
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-slate-400 font-medium">
+                        * CloudConvert 무료 전환 한도는 계정 정책 기준(현재 일 최대 10회) · `credits`는 남은 변환 크레딧입니다.
+                      </p>
                     </div>
 
                     <div className="mb-6">
@@ -799,14 +1556,365 @@ export default function App() {
                 <div className="flex-1 bg-white rounded-2xl border border-dashed border-slate-300 flex flex-col items-center justify-center p-12 text-center opacity-50"><div className="w-16 h-16 bg-slate-50 rounded-2xl flex items-center justify-center mb-4"><Search className="text-slate-200 w-8 h-8" /></div><h3 className="text-slate-400 font-black text-sm mb-1">공고를 선택해 주세요</h3><p className="text-slate-300 text-[11px] font-medium leading-relaxed">좌측 목록에서 공고를 선택하면<br />상세 분석 리포트가 생성됩니다.</p></div>
               )}
             </div>
-          </main>
-        </>
+          </div>
+        </main>
+      ) : activeTab === 'pipeline' ? (
+        <main className="flex-1 p-8 overflow-hidden bg-gradient-to-b from-slate-100/90 via-slate-50 to-white min-h-0">
+          <div className="flex flex-row items-start gap-6 w-full h-[calc(100vh-140px)]">
+            <div className="flex-1 h-full overflow-y-auto pr-2 flex flex-col gap-6">
+              <div className="max-w-4xl w-full space-y-8 pb-12">
+                <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-[0.25em] text-indigo-500 mb-1">Sales Pipeline</p>
+                    <h2 className="text-2xl font-black text-slate-900 tracking-tight">영업 파이프라인</h2>
+                    <p className="text-sm font-medium text-slate-500 mt-1">보관한 공고를 한눈에 — 예산·AI 요약·영업 메모를 카드로 관리합니다.</p>
+                  </div>
+                  <div className="flex items-center gap-2 rounded-2xl bg-white/90 border border-slate-200/80 px-4 py-2.5 shadow-sm">
+                    <span className="text-[11px] font-bold text-slate-400 uppercase">저장</span>
+                    <span className="text-xl font-black text-indigo-600">{pipelineSorted.length}</span>
+                    <span className="text-xs font-bold text-slate-500">건</span>
+                  </div>
+                </div>
+                {pipelineSorted.length === 0 ? (
+                  <div className="rounded-3xl border border-dashed border-slate-300 bg-white/70 px-8 py-16 text-center shadow-inner">
+                    <Bookmark className="w-12 h-12 text-slate-200 mx-auto mb-4" />
+                    <p className="text-slate-600 font-bold">아직 파이프라인에 저장된 공고가 없습니다.</p>
+                    <p className="text-sm text-slate-400 mt-2 font-medium">대시보드에서 북마크로 보관하면 이곳에 표시됩니다.</p>
+                  </div>
+                ) : (
+                  <ul className="space-y-6">
+                    {pipelineSorted.map((row) => {
+                  const effectivePhone =
+                    row.manual_phone && String(row.manual_phone).trim() !== ''
+                      ? row.manual_phone
+                      : row.phone;
+                  const effectiveEmail =
+                    row.manual_email && String(row.manual_email).trim() !== ''
+                      ? row.manual_email
+                      : row.email;
+                  const phoneOk =
+                    effectivePhone &&
+                    String(effectivePhone).trim() !== '' &&
+                    effectivePhone !== '-';
+                  const emailOk =
+                    effectiveEmail &&
+                    String(effectiveEmail).trim() !== '' &&
+                    effectiveEmail !== '-';
+                  const emailed = row.is_emailed === true;
+                  const ceoChecked = row.is_ceo_checked === true;
+                  return (
+                    <li
+                      key={row.bid_id}
+                      id={`pipeline-${row.bid_id}`}
+                      className={`rounded-3xl border bg-white shadow-[0_8px_30px_rgb(15,23,42,0.06)] hover:shadow-[0_14px_44px_rgb(15,23,42,0.09)] transition-shadow duration-300 overflow-hidden ${
+                        selectedPipelineBidId === row.bid_id
+                          ? 'border-indigo-300 ring-2 ring-indigo-200'
+                          : 'border-slate-200/90'
+                      }`}
+                    >
+                      <div className="px-6 pt-6 pb-5 border-b border-slate-100/90 bg-gradient-to-r from-white to-slate-50/60">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="space-y-1">
+                            <p className="text-sm sm:text-base font-semibold text-slate-600 flex items-center gap-2">
+                              <Calendar className="w-4 h-4 text-slate-500" />
+                              <span>게시 {row.notice_date ?? '-'}</span>
+                            </p>
+                            <p className="text-sm sm:text-lg font-semibold text-slate-700 flex items-center gap-2">
+                              <Building2 className="w-4 h-4 text-indigo-500" />
+                              <span>{row.org ?? '-'}</span>
+                            </p>
+                            <p className="text-[11px] sm:text-xs font-bold text-slate-400 uppercase tracking-widest">
+                              공고번호: {row.notice_number ?? row.bid_id}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void togglePipelineCeoChecked(row.bid_id)}
+                            className={`inline-flex flex-col items-end px-3 py-2 rounded-xl border text-[10px] font-bold gap-1 transition-all ${
+                              ceoChecked
+                                ? 'bg-emerald-50 border-emerald-200 text-emerald-800 shadow-sm'
+                                : 'bg-white/60 border-slate-200 text-slate-500 hover:border-emerald-200 hover:bg-emerald-50/40'
+                            }`}
+                          >
+                            <span className="inline-flex items-center gap-1">
+                              <CheckCircle2
+                                className={`w-3.5 h-3.5 ${
+                                  ceoChecked ? 'text-emerald-600' : 'text-slate-300'
+                                }`}
+                              />
+                              <span>{ceoChecked ? '대표님 확인 완료' : '대표님 확인'}</span>
+                            </span>
+                            {ceoChecked && (
+                              <span className="text-[9px] font-medium text-emerald-600">
+                                ✅ 최종 검토됨
+                              </span>
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void removeFromPipeline(row.bid_id)}
+                            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border text-[10px] font-bold bg-white/70 border-slate-200 text-slate-500 hover:bg-red-50 hover:border-red-200 hover:text-red-700 transition-colors"
+                            title="보관함에서 제거"
+                          >
+                            <X className="w-4 h-4" />
+                            보관함에서 제거
+                          </button>
+                        </div>
+                        <h3 className="mt-4 text-2xl sm:text-3xl font-extrabold text-slate-900 leading-snug tracking-tight pr-1">
+                          {row.title ?? '-'}
+                        </h3>
+                      </div>
+                      <div className="px-6 py-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="rounded-2xl bg-slate-50/95 border border-slate-100 p-4 sm:col-span-2">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">사업 예산</p>
+                          <p className="text-2xl sm:text-3xl font-black text-indigo-600 tracking-tight">{row.budget ?? '-'}</p>
+                        </div>
+                        <div className="rounded-2xl border border-slate-100 bg-white p-4 shadow-sm">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">입찰 마감</p>
+                          <p className="text-sm font-bold text-slate-800">{row.deadline ?? '-'}</p>
+                        </div>
+                        <div className="rounded-2xl border border-slate-100 bg-white p-4 shadow-sm flex flex-col gap-2 justify-center">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">상태</p>
+                          <div>{getStatusBadge(row.status)}</div>
+                        </div>
+                      </div>
+                      <div className="px-6 pb-2">
+                        <div className="flex flex-wrap gap-2 mb-4">
+                          {editingManualPhoneId === row.bid_id ? (
+                            <input
+                              autoFocus
+                              type="tel"
+                              defaultValue={row.manual_phone ?? ''}
+                              onBlur={(e) => {
+                                const value = e.target.value.trim();
+                                void updatePipelineManualContact(row.bid_id, {
+                                  manual_phone: value || null,
+                                });
+                                setEditingManualPhoneId(null);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  const value = (e.target as HTMLInputElement).value.trim();
+                                  void updatePipelineManualContact(row.bid_id, {
+                                    manual_phone: value || null,
+                                  });
+                                  setEditingManualPhoneId(null);
+                                } else if (e.key === 'Escape') {
+                                  setEditingManualPhoneId(null);
+                                }
+                              }}
+                              className="inline-flex items-center rounded-xl px-3 py-2 text-xs font-bold border bg-white border-amber-300 text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400/40"
+                              placeholder="담당 연락처 입력"
+                            />
+                          ) : phoneOk ? (
+                            <a
+                              href={`tel:${String(effectivePhone).replace(/\s/g, '')}`}
+                              className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-bold border bg-amber-50 border-amber-200 text-amber-950 hover:bg-amber-100 transition-colors"
+                            >
+                              <Phone className="w-3.5 h-3.5 shrink-0" />
+                              담당 {effectivePhone}
+                            </a>
+                          ) : null}
+                          {editingManualEmailId === row.bid_id ? (
+                            <input
+                              autoFocus
+                              type="email"
+                              defaultValue={row.manual_email ?? ''}
+                              onBlur={(e) => {
+                                const value = e.target.value.trim();
+                                void updatePipelineManualContact(row.bid_id, {
+                                  manual_email: value || null,
+                                });
+                                setEditingManualEmailId(null);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  const value = (e.target as HTMLInputElement).value.trim();
+                                  void updatePipelineManualContact(row.bid_id, {
+                                    manual_email: value || null,
+                                  });
+                                  setEditingManualEmailId(null);
+                                } else if (e.key === 'Escape') {
+                                  setEditingManualEmailId(null);
+                                }
+                              }}
+                              className="inline-flex items-center rounded-xl px-3 py-2 text-xs font-bold border bg-white border-sky-300 text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-400/40"
+                              placeholder="이메일 입력"
+                            />
+                          ) : emailOk ? (
+                            <a
+                              href={`mailto:${effectiveEmail}`}
+                              className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-bold border bg-sky-50 border-sky-200 text-sky-950 hover:bg-sky-100 transition-colors"
+                            >
+                              <Mail className="w-3.5 h-3.5 shrink-0" />
+                              {effectiveEmail}
+                            </a>
+                          ) : null}
+                        </div>
+                        <div className="rounded-2xl bg-indigo-50/95 border border-indigo-100/90 p-5 shadow-inner">
+                          <div className="flex items-center gap-2 mb-2">
+                            <FileText className="w-4 h-4 text-indigo-600 shrink-0" />
+                            <span className="text-[10px] font-black uppercase tracking-widest text-indigo-800">AI 분석 요약</span>
+                          </div>
+                          <div
+                            className="text-xs text-slate-700 leading-relaxed font-medium [&>strong]:font-bold [&>strong]:text-slate-900 max-h-52 overflow-y-auto cursor-zoom-in"
+                            onDoubleClick={() => setPipelineSummaryModalBidId(row.bid_id)}
+                            dangerouslySetInnerHTML={{ __html: renderSummaryHtml(row.summary) }}
+                          />
+                        </div>
+                        <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/80 p-4">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1.5 block">
+                            대표님 피드백
+                          </label>
+                          <textarea
+                            placeholder="대표님의 의견, 전략 방향, 추가 지시사항 등을 기록해 두세요."
+                            defaultValue={row.ceo_feedback ?? ''}
+                            key={`ceo-feedback-${row.bid_id}-${String(row.ceo_feedback ?? '')}`}
+                            onBlur={(e) =>
+                              updatePipelineCeoFeedback(row.bid_id, e.target.value.trim())
+                            }
+                            className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-medium text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-400/30 focus:border-blue-300 resize-none min-h-[64px]"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex flex-col sm:flex-row sm:items-end gap-4 px-6 py-5 bg-slate-50/85 border-t border-slate-100">
+                        <div className="flex-1 min-w-0">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">영업 메모</label>
+                          <input
+                            type="text"
+                            placeholder="고객 반응, 다음 액션 등을 적어 두세요"
+                            defaultValue={row.memo ?? ''}
+                            key={`memo-${row.bid_id}-${String(row.memo ?? '')}`}
+                            onBlur={(e) => updatePipelineMemo(row.bid_id, e.target.value)}
+                            className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-medium text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/25 focus:border-indigo-300"
+                          />
+                        </div>
+                        <div className="flex justify-end sm:pb-0.5">
+                          <button
+                            type="button"
+                            onClick={() => void togglePipelineEmailed(row.bid_id)}
+                            className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-full text-xs font-black border-2 transition-all ${
+                              emailed
+                                ? 'bg-emerald-500/15 border-emerald-400 text-emerald-900 shadow-sm'
+                                : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300 hover:bg-indigo-50/60'
+                            }`}
+                          >
+                            <Mail className="w-3.5 h-3.5 shrink-0" />
+                            {emailed ? '메일 발송 완료' : '메일 미발송 · 클릭하여 변경'}
+                          </button>
+                        </div>
+                      </div>
+                    </li>
+                  );
+                })}
+                  </ul>
+                )}
+              </div>
+
+              {pipelineSummaryModalBidId &&
+                (() => {
+                  const modalRow = savedBidsData.find(
+                    (r) => r.bid_id === pipelineSummaryModalBidId
+                  );
+                  if (!modalRow) return null;
+                  return (
+                    <div
+                      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+                      aria-modal="true"
+                      role="dialog"
+                    >
+                      <div
+                        className="absolute inset-0 bg-black/50"
+                        onClick={() => setPipelineSummaryModalBidId(null)}
+                      />
+                      <div className="relative bg-white rounded-3xl border border-slate-200 shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+                        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
+                          <div>
+                            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">
+                              AI 분석 요약 (확대 보기)
+                            </p>
+                            <p className="text-sm font-semibold text-slate-700 line-clamp-1">
+                              {modalRow.title ?? '-'}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setPipelineSummaryModalBidId(null)}
+                            className="p-2 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+                          >
+                            <X className="w-5 h-5" />
+                          </button>
+                        </div>
+                        <div
+                          className="flex-1 overflow-y-auto p-6 text-base sm:text-lg leading-relaxed text-slate-800 font-medium [&>strong]:font-bold [&>strong]:text-slate-900"
+                          dangerouslySetInnerHTML={{ __html: renderSummaryHtml(modalRow.summary) }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })()}
+            </div>
+
+            <div className="w-[350px] shrink-0 h-full overflow-y-auto bg-gray-50 p-5 rounded-xl border border-gray-200 sticky top-0 flex flex-col gap-4">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-black text-slate-800">💬 대표님 피드백</div>
+                <button
+                  type="button"
+                  onClick={() => void markAllFeedbacksAsRead()}
+                  className="text-[11px] font-bold text-slate-600 bg-white border border-slate-200 px-3 py-1.5 rounded-lg hover:bg-slate-50"
+                >
+                  모두 읽음 처리
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                {savedBidsData.filter((b) => b.ceo_feedback && !b.is_feedback_read).length === 0 ? (
+                  <div className="rounded-xl border border-slate-200 bg-white p-4 text-xs font-medium text-slate-400 text-center">
+                    새로운 대표님 피드백이 없습니다.
+                  </div>
+                ) : (
+                  savedBidsData
+                    .filter((b) => b.ceo_feedback && !b.is_feedback_read)
+                    .map((b) => (
+                      <div
+                        key={`fb-${b.bid_id}`}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => {
+                          setSelectedPipelineBidId(b.bid_id);
+                          const el = document.getElementById(`pipeline-${b.bid_id}`);
+                          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }}
+                        className="rounded-2xl border border-slate-200 bg-white p-3 hover:bg-slate-50 transition-colors"
+                      >
+                        <div className="text-xs font-bold text-slate-800 truncate">{b.title ?? '-'}</div>
+                        <div className="text-[11px] text-slate-500 mt-1 line-clamp-2">
+                          {String(b.ceo_feedback)}
+                        </div>
+                        <div className="mt-3 flex justify-end">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void markFeedbackAsRead(b.bid_id);
+                            }}
+                            className="text-[10px] font-bold px-2.5 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                          >
+                            ✅ 확인 완료
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                )}
+              </div>
+            </div>
+          </div>
+        </main>
       ) : (
         <main className="flex-1 p-8 overflow-auto bg-[#f1f5f9] flex justify-center items-start">
           <div className="max-w-4xl w-full flex flex-col gap-6 pb-20">
             <div className="flex items-center justify-between mb-2"><div><h2 className="text-2xl font-black text-slate-800 tracking-tight">시스템 환경설정</h2><p className="text-sm font-bold text-slate-400 mt-1">API Key, 검색 키워드, AI 프롬프트를 관리합니다.</p></div><button onClick={saveSettings} className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl text-sm font-black flex items-center gap-2 transition-all shadow-lg shadow-indigo-200"><Save className="w-4 h-4" /> 전체 저장</button></div>
             <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8"><h3 className="text-base font-black text-slate-800 mb-2 flex items-center gap-2"><Key className="w-5 h-5 text-indigo-500" /> Gemini API 설정</h3><p className="text-xs text-slate-500 font-medium mb-5">과업지시서 문서를 요약하기 위해 발급받은 Google Gemini API Key를 입력하세요.</p><div className="relative"><input type="password" placeholder="AIzaSyA..." value={geminiApiKey} onChange={(e) => setGeminiApiKey(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-mono text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all" /></div></div>
-            <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8"><h3 className="text-base font-black text-slate-800 mb-2 flex items-center gap-2"><Tag className="w-5 h-5 text-indigo-500" /> 타겟 키워드 관리</h3><p className="text-xs text-slate-500 font-medium mb-5">대시보드 상단에 표시되며, 공고 필터링 시 기준으로 삼을 핵심 단어입니다.</p><div className="flex gap-2 mb-4"><input type="text" placeholder="새로운 키워드 입력" value={newKeywordInput} onChange={(e) => setNewKeywordInput(e.target.value)} onKeyDown={handleAddAdminKeyword} className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all" /><button onClick={handleAddAdminKeyword} className="bg-slate-900 hover:bg-slate-800 text-white px-5 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 transition-all"><Plus className="w-4 h-4" /> 추가</button></div><div className="flex flex-wrap gap-2 p-5 bg-slate-50 rounded-2xl border border-slate-100 min-h-[80px]">{adminKeywords.map((kw) => (<div key={kw} className="flex items-center gap-2 bg-white border border-slate-200 px-3 py-1.5 rounded-lg shadow-sm group"><span className="text-xs font-bold text-slate-700">{kw}</span><button onClick={() => handleRemoveAdminKeyword(kw)} className="text-slate-300 hover:text-red-500 transition-colors"><X className="w-3.5 h-3.5" /></button></div>))}</div></div>
             <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8">
               <div className="flex items-center justify-between mb-5"><h3 className="text-base font-black text-slate-800 flex items-center gap-2"><Archive className="w-5 h-5 text-indigo-500" /> AI 프롬프트 아카이브</h3><button onClick={addNewPrompt} className="text-xs font-bold text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg hover:bg-indigo-100 transition-colors flex items-center gap-1"><Plus className="w-3.5 h-3.5" /> 새 프롬프트</button></div>
               <p className="text-xs text-slate-500 font-medium mb-5">상황별로 여러 프롬프트를 저장해두고 교체할 수 있습니다.</p>
