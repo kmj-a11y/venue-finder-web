@@ -6,13 +6,6 @@ import CloudConvert from 'cloudconvert';
 /** Vercel 서버리스 최대 실행 시간(초). CloudConvert·Gemini 등 장시간 작업 대비 */
 export const maxDuration = 60;
 
-export const config = {
-  api: {
-    bodyParser: false,
-    responseLimit: false,
-  },
-};
-
 export const MAX_DOCUMENT_CHARS = 15_000;
 
 const cloudConvert = new CloudConvert(process.env.CLOUDCONVERT_API_KEY || '');

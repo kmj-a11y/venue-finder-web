@@ -97,6 +97,64 @@ function renderSummaryHtml(text: any) {
   return escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br/>');
 }
 
+/** 공고 게시일(noticeDate YYYY-MM-DD)이 헤더에서 선택한 월(YYYY-MM)과 일치하는지 */
+function bidNoticeInSelectedMonth(bid: any, monthYm: string) {
+  const nd = bid?.noticeDate;
+  if (nd == null || nd === '' || nd === '-') return false;
+  const s = String(nd).trim();
+  return s.length >= 7 && s.slice(0, 7) === monthYm;
+}
+
+/** 개찰 보충 API 대상: 입찰 마감 또는 종료 */
+function isClosedOrEndedBidStatus(status: any) {
+  const t = String(status ?? '').trim();
+  if (t === '입찰 마감') return true;
+  if (t === '종료') return true;
+  return false;
+}
+
+const RESULT_FETCH_THROTTLE_MS = 500;
+
+/** 영업 메모: 다중 줄 + scrollHeight 기반 자동 높이 (렌더 루프/의존성과 분리된 로컬 ref) */
+function PipelineSalesMemoTextarea({
+  bidId,
+  memo,
+  onSave,
+  className,
+}: {
+  bidId: string;
+  memo: string;
+  onSave: (value: string) => void;
+  className?: string;
+}) {
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const adjustHeight = () => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.max(el.scrollHeight, 42)}px`;
+  };
+  useEffect(() => {
+    adjustHeight();
+  }, [bidId, memo]);
+  return (
+    <textarea
+      ref={taRef}
+      placeholder="고객 반응, 다음 액션 등을 적어 두세요"
+      defaultValue={memo ?? ''}
+      key={`memo-${bidId}-${String(memo ?? '')}`}
+      onChange={(e) => {
+        const el = e.target;
+        el.style.height = 'auto';
+        el.style.height = `${Math.max(el.scrollHeight, 42)}px`;
+      }}
+      onBlur={(e) => onSave(e.target.value)}
+      rows={1}
+      className={className}
+    />
+  );
+}
+
 import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
@@ -113,9 +171,11 @@ export default function App() {
   const [selectedMonth, setSelectedMonth] = useState(() => yyyyMmKstToday());
   const [searchKeyword, setSearchKeyword] = useState('');
   const [showSavedOnly, setShowSavedOnly] = useState(false);
+  const [bids, setBids] = useState<any[]>([]);
+  const bidsRef = useRef<any[]>([]);
+  const savedBidIdsRef = useRef<Set<string>>(new Set());
   const [selectedBid, setSelectedBid] = useState<any | null>(null);
   const [bidResult, setBidResult] = useState<any | null>(null);
-  const [bids, setBids] = useState<any[]>([]);
   const [savedBidIds, setSavedBidIds] = useState(new Set()); 
   const [savedBidsData, setSavedBidsData] = useState<any[]>([]);
   const [analyzedBidIds, setAnalyzedBidIds] = useState<Set<string>>(new Set());
@@ -189,7 +249,7 @@ export default function App() {
     };
 
     loadInitialData();
-    handleRefresh();
+    handleRefresh(true);
   }, []);
 
   useEffect(() => {
@@ -223,6 +283,14 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    bidsRef.current = bids;
+  }, [bids]);
+
+  useEffect(() => {
+    savedBidIdsRef.current = savedBidIds;
+  }, [savedBidIds]);
 
   const toggleAnalyzedStatus = async (bidId: string) => {
     const isAnalyzed = analyzedBidIds.has(bidId);
@@ -334,11 +402,16 @@ export default function App() {
     }
   };
 
-  const fetchMissingResults = async (currentBids) => {
+  /**
+   * API 최신화 버튼(handleRefresh)에서만 호출 — useEffect에 넣지 말 것(무한 호출 방지).
+   * 선택 월 + 입찰마감/종료 + 개찰 미확정만 순차 호출(0.5초 간격).
+   */
+  const refreshResultsForSelectedMonth = async (currentBids: any[], monthYm: string) => {
     try {
       const targets = (currentBids ?? []).filter((b) => {
         if (!b) return false;
-        if (b.status !== '입찰 마감') return false;
+        if (!bidNoticeInSelectedMonth(b, monthYm)) return false;
+        if (!isClosedOrEndedBidStatus(b.status)) return false;
         if (!b.bidNtceNo) return false;
 
         const rs = b.result_status;
@@ -366,8 +439,8 @@ export default function App() {
                 : null;
 
             if (statusStr || winnerStr) {
-              setBids((prev) =>
-                (prev ?? []).map((b) =>
+              setBids((prev) => {
+                const next = (prev ?? []).map((b) =>
                   b.id === bid.id
                     ? {
                         ...b,
@@ -375,22 +448,21 @@ export default function App() {
                         result_winner: winnerStr ?? b.result_winner,
                       }
                     : b
-                )
-              );
-              if (selectedBid?.id === bid.id) {
-                setSelectedBid((prev) =>
-                  prev && prev.id === bid.id
-                    ? {
-                        ...prev,
-                        result_status: statusStr ?? prev.result_status,
-                        result_winner: winnerStr ?? prev.result_winner,
-                      }
-                    : prev
                 );
-              }
+                bidsRef.current = next;
+                return next;
+              });
+              setSelectedBid((prev) =>
+                prev && prev.id === bid.id
+                  ? {
+                      ...prev,
+                      result_status: statusStr ?? prev.result_status,
+                      result_winner: winnerStr ?? prev.result_winner,
+                    }
+                  : prev
+              );
 
-              // 파이프라인(saved_bids)에 저장된 공고라면 3개 컬럼만 부분 업데이트 (수기 컬럼 덮어쓰기 방지)
-              if (savedBidIds.has(bid.id)) {
+              if (savedBidIdsRef.current.has(bid.id)) {
                 const { error: upErr } = await supabase
                   .from('saved_bids')
                   .update({
@@ -419,18 +491,18 @@ export default function App() {
             }
           }
         } catch (e) {
-          console.error('fetchMissingResults item error:', e);
+          console.error('refreshResultsForSelectedMonth item error:', e);
         }
 
-        // IP 차단 방지 딜레이
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        await new Promise((resolve) => setTimeout(resolve, RESULT_FETCH_THROTTLE_MS));
       }
     } catch (e) {
-      console.error('fetchMissingResults error:', e);
+      console.error('refreshResultsForSelectedMonth error:', e);
     }
   };
 
-  const handleRefresh = async () => {
+  const handleRefresh = async (skipResultBackfill = false) => {
+    let mergedSnapshot: any[] | null = null;
     setIsLoading(true);
     setLoadingPhase('fetch');
     try {
@@ -564,7 +636,9 @@ export default function App() {
         ...b,
         summary: cacheMap.get(b.id) ?? b.summary ?? '-',
       }));
-      setBids((prev) => mergeFetchedBidsWithPrevious(prev, mergedBids));
+      mergedSnapshot = mergeFetchedBidsWithPrevious(bidsRef.current, mergedBids);
+      setBids(mergedSnapshot);
+      bidsRef.current = mergedSnapshot;
       showToast(`동기화 완료: 이번에 반영된 채용대행·위탁 공고 ${mergedBids.length}건 (기존 목록과 병합)`);
     } catch (err) {
       console.error('handleRefresh error:', err);
@@ -572,11 +646,13 @@ export default function App() {
     } finally {
       setIsLoading(false);
       setLoadingPhase('idle');
-      // Track B: 과거 미완료 공고 보정은 UI와 분리해 "조용히" 백그라운드로 실행 (await 금지)
-      try {
-        void fetch('/api/sync-past', { cache: 'no-store' });
-      } catch {
-        // ignore
+      if (!skipResultBackfill) {
+        try {
+          const base = mergedSnapshot ?? bidsRef.current;
+          await refreshResultsForSelectedMonth(base, selectedMonth);
+        } catch (e) {
+          console.error('refreshResultsForSelectedMonth (handleRefresh finally):', e);
+        }
       }
     }
   };
@@ -1234,7 +1310,7 @@ export default function App() {
           <div className="flex items-center bg-slate-100 rounded-lg px-3 py-1.5 border border-slate-200 w-64 focus-within:ring-2 focus-within:ring-indigo-500 transition-all"><Search className="w-3.5 h-3.5 text-slate-400 mr-2" /><input type="text" placeholder="검색어 입력 (예: 예금보험)" value={searchKeyword} onChange={(e) => setSearchKeyword(e.target.value)} className="bg-transparent border-none focus:outline-none text-xs font-bold text-slate-700 w-full placeholder-slate-400" /></div>
           <div className="w-px h-5 bg-slate-200 mx-1"></div>
           <div className="flex items-center bg-slate-100 rounded-lg px-3 py-1.5 border border-slate-200"><Calendar className="w-3.5 h-3.5 text-slate-500 mr-2" /><input type="month" value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} className="bg-transparent border-none focus:outline-none text-xs font-bold text-slate-700 w-32" /></div>
-          <button onClick={handleRefresh} disabled={isLoading} className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-lg text-xs font-bold transition-all disabled:opacity-70 disabled:cursor-not-allowed"><RefreshCcw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} /> API 최신화</button>
+          <button type="button" onClick={() => void handleRefresh(false)} disabled={isLoading} className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-lg text-xs font-bold transition-all disabled:opacity-70 disabled:cursor-not-allowed"><RefreshCcw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} /> API 최신화</button>
           <button onClick={handleBatchAnalyze} disabled={isAnalyzing || isLoading} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-bold transition-all disabled:opacity-70 disabled:cursor-not-allowed">{isAnalyzing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '✨'} 미분석 공고 AI 분석</button>
         </div>
       </header>
@@ -1786,13 +1862,11 @@ export default function App() {
                       <div className="flex flex-col sm:flex-row sm:items-end gap-4 px-6 py-5 bg-slate-50/85 border-t border-slate-100">
                         <div className="flex-1 min-w-0">
                           <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 block">영업 메모</label>
-                          <input
-                            type="text"
-                            placeholder="고객 반응, 다음 액션 등을 적어 두세요"
-                            defaultValue={row.memo ?? ''}
-                            key={`memo-${row.bid_id}-${String(row.memo ?? '')}`}
-                            onBlur={(e) => updatePipelineMemo(row.bid_id, e.target.value)}
-                            className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-medium text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/25 focus:border-indigo-300"
+                          <PipelineSalesMemoTextarea
+                            bidId={row.bid_id}
+                            memo={row.memo ?? ''}
+                            onSave={(v) => updatePipelineMemo(row.bid_id, v)}
+                            className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-medium text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/25 focus:border-indigo-300 resize-none overflow-hidden min-h-[42px]"
                           />
                         </div>
                         <div className="flex justify-end sm:pb-0.5">
