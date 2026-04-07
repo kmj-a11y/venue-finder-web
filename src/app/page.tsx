@@ -59,6 +59,7 @@ function mergeFetchedBidsWithPrevious(prev: any, freshWithCache: any) {
     map.set(String(b?.id ?? ''), {
       ...b,
       summary: keepSummary ? old.summary : b.summary,
+      bid_result: b.bid_result ?? old.bid_result,
       result_status: b.result_status ?? old.result_status,
       result_winner: b.result_winner ?? old.result_winner,
     });
@@ -472,6 +473,15 @@ export default function App() {
     }
   };
 
+  /** `/api/result` 응답으로부터 캐시용 bid_result 문자열 생성 (승자명 우선, 없으면 유찰) */
+  const computeBidResultString = (statusStr: string | null, winnerStr: string | null) => {
+    if (winnerStr != null && String(winnerStr).trim() !== '' && String(winnerStr).trim() !== '-') {
+      return String(winnerStr).trim();
+    }
+    if (statusStr != null && /유찰/.test(String(statusStr).trim())) return '유찰';
+    return null;
+  };
+
   /**
    * API 최신화 버튼(handleRefresh)에서만 호출 — useEffect에 넣지 말 것(무한 호출 방지).
    * 선택 월 + 입찰마감/종료 + 개찰 미확정만 순차 호출(0.5초 간격).
@@ -486,11 +496,14 @@ export default function App() {
 
         const rs = b.result_status;
         const rw = b.result_winner;
+        const br = b.bid_result;
         const hasWinner = rw != null && String(rw).trim() !== '' && String(rw).trim() !== '-';
         const hasYuchal = rs != null && /유찰/.test(String(rs).trim());
+        const hasBidResult = br != null && String(br).trim() !== '' && String(br).trim() !== '-';
         const hasAnyResult = (rs != null && String(rs).trim() !== '') || hasWinner;
         if (hasWinner || hasYuchal) return false;
         if (hasAnyResult) return false;
+        if (hasBidResult) return false;
 
         return true;
       });
@@ -507,13 +520,25 @@ export default function App() {
               data.winner != null && String(data.winner).trim() !== '' && data.winner !== '-'
                 ? String(data.winner).trim()
                 : null;
+            const bidResultStr = computeBidResultString(statusStr, winnerStr);
 
-            if (statusStr || winnerStr) {
+            if (statusStr || winnerStr || bidResultStr) {
+              // 1) g2b_result_cache는 항상 UPSERT (전체공고도 새로고침 시 유지)
+              if (bidResultStr) {
+                const { error: cacheErr } = await supabase
+                  .from('g2b_result_cache')
+                  .upsert({ bid_id: bid.id, bid_result: bidResultStr }, { onConflict: 'bid_id' });
+                if (cacheErr) {
+                  console.error('g2b_result_cache upsert:', cacheErr);
+                }
+              }
+
               setBids((prev) => {
                 const next = (prev ?? []).map((b) =>
                   b.id === bid.id
                     ? {
                         ...b,
+                        bid_result: bidResultStr ?? b.bid_result,
                         result_status: statusStr ?? b.result_status,
                         result_winner: winnerStr ?? b.result_winner,
                       }
@@ -526,18 +551,21 @@ export default function App() {
                 prev && prev.id === bid.id
                   ? {
                       ...prev,
+                      bid_result: bidResultStr ?? prev.bid_result,
                       result_status: statusStr ?? prev.result_status,
                       result_winner: winnerStr ?? prev.result_winner,
                     }
                   : prev
               );
 
+              // 2) 보관함(saved_bids)에 있는 공고면 거기도 UPDATE (기존 로직 유지)
               if (savedBidIdsRef.current.has(bid.id)) {
                 const { error: upErr } = await supabase
                   .from('saved_bids')
                   .update({
                     result_status: statusStr,
                     result_winner: winnerStr,
+                    bid_result: bidResultStr,
                     status: bid.status,
                   })
                   .eq('bid_id', bid.id);
@@ -549,6 +577,7 @@ export default function App() {
                       r.bid_id === bid.id
                         ? {
                             ...r,
+                            bid_result: bidResultStr ?? r.bid_result,
                             result_status: statusStr ?? r.result_status,
                             result_winner: winnerStr ?? r.result_winner,
                             status: bid.status ?? r.status,
@@ -702,9 +731,35 @@ export default function App() {
           if (r.bid_id != null && r.summary != null) cacheMap.set(r.bid_id, String(r.summary));
         });
       }
+
+      // (1) g2b_result_cache를 함께 불러와 bid_id 기준으로 bid_result 병합
+      const resultMap = new Map<string, string>();
+      if (bidIds.length > 0) {
+        const { data: resultRows, error: resultErr } = await supabase
+          .from('g2b_result_cache')
+          .select('bid_id, bid_result')
+          .in('bid_id', bidIds);
+        if (resultErr) {
+          console.error('g2b_result_cache load error:', resultErr);
+        }
+        (resultRows ?? []).forEach((r: any) => {
+          if (r?.bid_id != null && r?.bid_result != null) {
+            const v = String(r.bid_result).trim();
+            if (v) resultMap.set(String(r.bid_id), v);
+          }
+        });
+      }
+
       const mergedBids = filteredBids.map((b) => ({
         ...b,
         summary: cacheMap.get(b.id) ?? b.summary ?? '-',
+        bid_result: resultMap.get(b.id) ?? b.bid_result ?? null,
+        // 기존 배지 렌더링(result_status/result_winner)을 위해 bid_result가 있으면 필드를 보조로 채움
+        result_status:
+          (resultMap.get(b.id) === '유찰' ? '유찰' : null) ?? b.result_status,
+        result_winner:
+          (resultMap.get(b.id) && resultMap.get(b.id) !== '유찰' ? resultMap.get(b.id) : null) ??
+          b.result_winner,
       }));
       mergedSnapshot = mergeFetchedBidsWithPrevious(bidsRef.current, mergedBids);
       setBids(mergedSnapshot);
