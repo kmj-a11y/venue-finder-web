@@ -260,6 +260,12 @@ export default function App() {
     fetchQuota();
   }, []);
 
+  // 월 이동 시에도 목록을 다시 불러오며(캐시 병합 포함), 결과가 즉시 박힌 상태로 보이게 함
+  useEffect(() => {
+    void handleRefresh(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedMonth]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -614,7 +620,7 @@ export default function App() {
    */
   const refreshResultsForSelectedMonth = async (currentBids: any[], monthYm: string) => {
     try {
-      const targets = (currentBids ?? []).filter((b) => {
+      const candidates = (currentBids ?? []).filter((b) => {
         if (!b) return false;
         if (!bidNoticeInSelectedMonth(b, monthYm)) return false;
         if (!isClosedOrEndedBidStatus(b.status)) return false;
@@ -633,6 +639,29 @@ export default function App() {
 
         return true;
       });
+
+      // [2] 철저한 사전 필터링: DB(g2b_result_cache, saved_bids)에 결과가 있으면 대상에서 제외
+      const candidateIds = (candidates ?? []).map((b) => String(b?.id ?? '')).filter(Boolean);
+      const idsWithDbResult = new Set<string>();
+      if (candidateIds.length > 0) {
+        const [{ data: cacheRows, error: cacheErr }, { data: savedRows, error: savedErr }] =
+          await Promise.all([
+            supabase.from('g2b_result_cache').select('bid_id, bid_result').in('bid_id', candidateIds),
+            supabase.from('saved_bids').select('bid_id, bid_result').in('bid_id', candidateIds),
+          ]);
+        if (cacheErr) console.error('refreshResultsForSelectedMonth g2b_result_cache check:', cacheErr);
+        if (savedErr) console.error('refreshResultsForSelectedMonth saved_bids check:', savedErr);
+        (cacheRows ?? []).forEach((r: any) => {
+          const v = r?.bid_result != null ? String(r.bid_result).trim() : '';
+          if (r?.bid_id && v) idsWithDbResult.add(String(r.bid_id));
+        });
+        (savedRows ?? []).forEach((r: any) => {
+          const v = r?.bid_result != null ? String(r.bid_result).trim() : '';
+          if (r?.bid_id && v) idsWithDbResult.add(String(r.bid_id));
+        });
+      }
+
+      const targets = (candidates ?? []).filter((b) => !idsWithDbResult.has(String(b?.id ?? '')));
 
       for (const bid of targets) {
         try {
@@ -858,35 +887,56 @@ export default function App() {
         });
       }
 
-      // (1) g2b_result_cache를 함께 불러와 bid_id 기준으로 bid_result 병합
-      const resultMap = new Map<string, string>();
+      // [1][3] 월 이동/초기 로딩 시: g2b_result_cache + saved_bids 둘 다 조회해 bid_result를 즉시 병합
+      const resultMap = new Map<string, string>(); // g2b_result_cache 우선
+      const savedResultMap = new Map<string, string>(); // cache에 없으면 fallback
       if (bidIds.length > 0) {
-        const { data: resultRows, error: resultErr } = await supabase
-          .from('g2b_result_cache')
-          .select('bid_id, bid_result')
-          .in('bid_id', bidIds);
-        if (resultErr) {
-          console.error('g2b_result_cache load error:', resultErr);
-        }
+        const [{ data: resultRows, error: resultErr }, { data: savedRows, error: savedErr }] =
+          await Promise.all([
+            supabase.from('g2b_result_cache').select('bid_id, bid_result').in('bid_id', bidIds),
+            supabase.from('saved_bids').select('bid_id, bid_result').in('bid_id', bidIds),
+          ]);
+
+        if (resultErr) console.error('g2b_result_cache load error:', resultErr);
+        if (savedErr) console.error('saved_bids result load error:', savedErr);
+
         (resultRows ?? []).forEach((r: any) => {
           if (r?.bid_id != null && r?.bid_result != null) {
             const v = String(r.bid_result).trim();
             if (v) resultMap.set(String(r.bid_id), v);
           }
         });
+        (savedRows ?? []).forEach((r: any) => {
+          if (r?.bid_id != null && r?.bid_result != null) {
+            const v = String(r.bid_result).trim();
+            if (v) savedResultMap.set(String(r.bid_id), v);
+          }
+        });
+
+        // saved_bids에만 있던 과거 결과는 캐시로도 인정(백필) — 다음 로딩부터 즉시 표시되게 함
+        const backfill = Array.from(savedResultMap.entries())
+          .filter(([bidId, v]) => v && !resultMap.has(bidId))
+          .map(([bidId, v]) => ({ bid_id: bidId, bid_result: v }));
+        if (backfill.length > 0) {
+          const { error: backfillErr } = await supabase
+            .from('g2b_result_cache')
+            .upsert(backfill, { onConflict: 'bid_id' });
+          if (backfillErr) console.error('g2b_result_cache backfill from saved_bids:', backfillErr);
+          backfill.forEach((r) => resultMap.set(String(r.bid_id), String(r.bid_result)));
+        }
       }
 
-      const mergedBids = filteredBids.map((b) => ({
-        ...b,
-        summary: cacheMap.get(b.id) ?? b.summary ?? '-',
-        bid_result: resultMap.get(b.id) ?? b.bid_result ?? null,
-        // 기존 배지 렌더링(result_status/result_winner)을 위해 bid_result가 있으면 필드를 보조로 채움
-        result_status:
-          (resultMap.get(b.id) === '유찰' ? '유찰' : null) ?? b.result_status,
-        result_winner:
-          (resultMap.get(b.id) && resultMap.get(b.id) !== '유찰' ? resultMap.get(b.id) : null) ??
-          b.result_winner,
-      }));
+      const mergedBids = filteredBids.map((b) => {
+        const cachedResult = resultMap.get(b.id) ?? savedResultMap.get(b.id) ?? null;
+        return {
+          ...b,
+          summary: cacheMap.get(b.id) ?? b.summary ?? '-',
+          bid_result: cachedResult ?? b.bid_result ?? null,
+          // 기존 배지 렌더링(result_status/result_winner)을 위해 bid_result가 있으면 필드를 보조로 채움
+          result_status: (cachedResult === '유찰' ? '유찰' : null) ?? b.result_status,
+          result_winner: (cachedResult && cachedResult !== '유찰' ? cachedResult : null) ?? b.result_winner,
+        };
+      });
       mergedSnapshot = mergeFetchedBidsWithPrevious(bidsRef.current, mergedBids);
       setBids(mergedSnapshot);
       bidsRef.current = mergedSnapshot;
