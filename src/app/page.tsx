@@ -402,43 +402,169 @@ export default function App() {
       setBidResult(null);
       return;
     }
+
+    // [1] Cache-first: 이미 선택된 공고 객체에 결과가 있으면 API 호출 금지
+    const localBidResult = selectedBid?.bid_result;
+    const localWinner = selectedBid?.result_winner;
+    const localStatus = selectedBid?.result_status;
+    const hasLocalBidResult =
+      localBidResult != null && String(localBidResult).trim() !== '' && String(localBidResult).trim() !== '-';
+    const hasLocalWinner =
+      localWinner != null && String(localWinner).trim() !== '' && String(localWinner).trim() !== '-';
+    const hasLocalYuchal = localStatus != null && /유찰/.test(String(localStatus).trim());
+
+    if (hasLocalBidResult || hasLocalWinner || hasLocalYuchal) {
+      const winner =
+        hasLocalBidResult && String(localBidResult).trim() !== '유찰'
+          ? String(localBidResult).trim()
+          : hasLocalWinner
+            ? String(localWinner).trim()
+            : '-';
+      const status = hasLocalYuchal || String(localBidResult).trim() === '유찰' ? '유찰' : (localStatus ?? '개찰완료');
+      setBidResult({ status, winner, amount: '-' });
+      return;
+    }
+
+    // 마감 상태가 아니면 결과 조회 대상 아님
     if (selectedBid.status !== '입찰 마감' || !selectedBid.bidNtceNo) {
       setBidResult(null);
       return;
     }
+
     let cancelled = false;
     setBidResult(null);
-    fetch(`/api/result?bidNo=${encodeURIComponent(selectedBid.bidNtceNo)}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (cancelled || data.status == null) return;
+
+    (async () => {
+      try {
+        // [1] DB 캐시 우선 조회: g2b_result_cache에 있으면 API 호출 스킵
+        const { data: cached, error: cacheErr } = await supabase
+          .from('g2b_result_cache')
+          .select('bid_result')
+          .eq('bid_id', selectedBid.id)
+          .maybeSingle();
+        if (cancelled) return;
+        if (cacheErr) {
+          console.error('g2b_result_cache lookup:', cacheErr);
+        }
+        const cachedBidResult =
+          cached?.bid_result != null && String(cached.bid_result).trim() !== ''
+            ? String(cached.bid_result).trim()
+            : null;
+        if (cachedBidResult) {
+          const winner = cachedBidResult !== '유찰' ? cachedBidResult : '-';
+          const status = cachedBidResult === '유찰' ? '유찰' : '개찰완료';
+          setBidResult({ status, winner, amount: '-' });
+
+          // 메인 상태에도 즉시 반영 (새로고침 없이 배지 동기화)
+          setBids((prev: any[]) => {
+            const next = (prev ?? []).map((b) =>
+              b.id === selectedBid.id
+                ? {
+                    ...b,
+                    bid_result: cachedBidResult,
+                    result_status: cachedBidResult === '유찰' ? '유찰' : b.result_status,
+                    result_winner: cachedBidResult !== '유찰' ? cachedBidResult : b.result_winner,
+                  }
+                : b
+            );
+            bidsRef.current = next;
+            return next;
+          });
+          setSelectedBid((prev: any) =>
+            prev && prev.id === selectedBid.id
+              ? {
+                  ...prev,
+                  bid_result: cachedBidResult,
+                  result_status: cachedBidResult === '유찰' ? '유찰' : prev.result_status,
+                  result_winner: cachedBidResult !== '유찰' ? cachedBidResult : prev.result_winner,
+                }
+              : prev
+          );
+          return;
+        }
+
+        // [2] 캐시에도 없으면 부득이하게 API 호출 + 듀얼 세이브
+        const res = await fetch(`/api/result?bidNo=${encodeURIComponent(selectedBid.bidNtceNo)}`, { cache: 'no-store' });
+        const data = await res.json().catch(() => null);
+        if (cancelled || !data || data.status == null) return;
+
         const statusStr = data.status !== '-' && data.status != null ? String(data.status) : null;
         const winnerStr =
           data.winner != null && String(data.winner).trim() !== '' && data.winner !== '-'
             ? String(data.winner).trim()
             : null;
+        const bidResultStr = computeBidResultString(statusStr, winnerStr);
+
         setBidResult({ status: data.status, winner: data.winner ?? '-', amount: data.amount ?? '-' });
-        setBids((prev: any[]) =>
-          prev.map((b) =>
+
+        if (bidResultStr) {
+          const { error: upErr } = await supabase
+            .from('g2b_result_cache')
+            .upsert({ bid_id: selectedBid.id, bid_result: bidResultStr }, { onConflict: 'bid_id' });
+          if (upErr) console.error('g2b_result_cache upsert (selectedBid):', upErr);
+        }
+
+        if (savedBidIdsRef.current.has(selectedBid.id)) {
+          const { error: savedErr } = await supabase
+            .from('saved_bids')
+            .update({
+              bid_result: bidResultStr,
+              result_status: statusStr,
+              result_winner: winnerStr,
+              status: selectedBid.status,
+            })
+            .eq('bid_id', selectedBid.id);
+          if (savedErr) console.error('saved_bids result update (selectedBid):', savedErr);
+          else {
+            setSavedBidsData((prev) =>
+              (prev ?? []).map((r) =>
+                r.bid_id === selectedBid.id
+                  ? {
+                      ...r,
+                      bid_result: bidResultStr ?? r.bid_result,
+                      result_status: statusStr ?? r.result_status,
+                      result_winner: winnerStr ?? r.result_winner,
+                      status: selectedBid.status ?? r.status,
+                    }
+                  : r
+              )
+            );
+          }
+        }
+
+        setBids((prev: any[]) => {
+          const next = (prev ?? []).map((b) =>
             b.id === selectedBid.id
-              ? { ...b, result_status: statusStr ?? b.result_status, result_winner: winnerStr ?? b.result_winner }
+              ? {
+                  ...b,
+                  bid_result: bidResultStr ?? b.bid_result,
+                  result_status: statusStr ?? b.result_status,
+                  result_winner: winnerStr ?? b.result_winner,
+                }
               : b
-          )
-        );
+          );
+          bidsRef.current = next;
+          return next;
+        });
         setSelectedBid((prev: any) =>
           prev && prev.id === selectedBid.id
             ? {
                 ...prev,
+                bid_result: bidResultStr ?? prev.bid_result,
                 result_status: statusStr ?? prev.result_status,
                 result_winner: winnerStr ?? prev.result_winner,
               }
             : prev
         );
-      })
-      .catch(() => {
+      } catch (e) {
         if (!cancelled) setBidResult(null);
-      });
-    return () => { cancelled = true; };
+        console.error('selectedBid result fetch/save:', e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [selectedBid?.id, selectedBid?.status, selectedBid?.bidNtceNo]);
 
   const showToast = (msg) => {
