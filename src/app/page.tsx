@@ -98,6 +98,27 @@ function renderSummaryHtml(text: any) {
   return escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br/>');
 }
 
+/** bid_id 포맷 정규화: `RxxBK...-1`도 `RxxBK...-001`로 통일 */
+function normalizeBidId(bidId: any): string {
+  const s = String(bidId ?? '').trim();
+  const m = s.match(/^(R\d{2}BK\d+)-(\d+)$/i);
+  if (!m) return s;
+  const bidNo = m[1];
+  const ord = String(parseInt(m[2], 10)).padStart(3, '0');
+  return `${bidNo}-${ord}`;
+}
+
+/** DB 조회 시 호환을 위해 bid_id 변형들을 함께 조회 */
+function bidIdVariantsForLookup(bidId: any): string[] {
+  const n = normalizeBidId(bidId);
+  const m = n.match(/^(R\d{2}BK\d+)-(\d{3})$/i);
+  if (!m) return [String(bidId ?? '').trim()].filter(Boolean);
+  const bidNo = m[1];
+  const unpadded = String(parseInt(m[2], 10)); // '001' -> '1'
+  const out = new Set<string>([n, `${bidNo}-${unpadded}`]);
+  return Array.from(out);
+}
+
 /** 공고 게시일(noticeDate YYYY-MM-DD)이 헤더에서 선택한 월(YYYY-MM)과 일치하는지 */
 function bidNoticeInSelectedMonth(bid: any, monthYm: string) {
   const nd = bid?.noticeDate;
@@ -793,7 +814,7 @@ export default function App() {
       const now = new Date();
       const mapItem = (item) => {
         const bidNtceNo = item.bidNtceNo ?? '';
-        const bidNtceOrd = item.bidNtceOrd ?? '';
+        const bidNtceOrd = String(item.bidNtceOrd ?? '').padStart(3, '0');
         const bfSpecRegNo =
           item.bfSpecRegNo ??
           item.bf_spec_reg_no ??
@@ -834,7 +855,7 @@ export default function App() {
             : null;
 
         return {
-          id: `${bidNtceNo}-${bidNtceOrd}`,
+          id: normalizeBidId(`${bidNtceNo}-${bidNtceOrd}`),
           bidNtceNo,
           bidNtceOrd,
           bfSpecRegNo:
@@ -875,15 +896,15 @@ export default function App() {
         return;
       }
 
-      const bidIds = filteredBids.map((b) => b.id).filter(Boolean);
+      const bidIds = filteredBids.map((b) => normalizeBidId(b.id)).filter(Boolean);
       const cacheMap = new Map();
       if (bidIds.length > 0) {
         const { data: cacheRows } = await supabase
           .from('ai_analysis_cache')
           .select('bid_id, summary')
-          .in('bid_id', bidIds);
+          .in('bid_id', Array.from(new Set(bidIds.flatMap(bidIdVariantsForLookup))));
         (cacheRows ?? []).forEach((r) => {
-          if (r.bid_id != null && r.summary != null) cacheMap.set(r.bid_id, String(r.summary));
+          if (r.bid_id != null && r.summary != null) cacheMap.set(normalizeBidId(r.bid_id), String(r.summary));
         });
       }
 
@@ -891,10 +912,11 @@ export default function App() {
       const resultMap = new Map<string, string>(); // g2b_result_cache 우선
       const savedResultMap = new Map<string, string>(); // cache에 없으면 fallback
       if (bidIds.length > 0) {
+        const lookupIds = Array.from(new Set(bidIds.flatMap(bidIdVariantsForLookup)));
         const [{ data: resultRows, error: resultErr }, { data: savedRows, error: savedErr }] =
           await Promise.all([
-            supabase.from('g2b_result_cache').select('bid_id, bid_result').in('bid_id', bidIds),
-            supabase.from('saved_bids').select('bid_id, bid_result').in('bid_id', bidIds),
+            supabase.from('g2b_result_cache').select('bid_id, bid_result').in('bid_id', lookupIds),
+            supabase.from('saved_bids').select('bid_id, bid_result').in('bid_id', lookupIds),
           ]);
 
         if (resultErr) console.error('g2b_result_cache load error:', resultErr);
@@ -903,13 +925,13 @@ export default function App() {
         (resultRows ?? []).forEach((r: any) => {
           if (r?.bid_id != null && r?.bid_result != null) {
             const v = String(r.bid_result).trim();
-            if (v) resultMap.set(String(r.bid_id), v);
+            if (v) resultMap.set(normalizeBidId(r.bid_id), v);
           }
         });
         (savedRows ?? []).forEach((r: any) => {
           if (r?.bid_id != null && r?.bid_result != null) {
             const v = String(r.bid_result).trim();
-            if (v) savedResultMap.set(String(r.bid_id), v);
+            if (v) savedResultMap.set(normalizeBidId(r.bid_id), v);
           }
         });
 
@@ -927,10 +949,12 @@ export default function App() {
       }
 
       const mergedBids = filteredBids.map((b) => {
-        const cachedResult = resultMap.get(b.id) ?? savedResultMap.get(b.id) ?? null;
+        const bidId = normalizeBidId(b.id);
+        const cachedResult = resultMap.get(bidId) ?? savedResultMap.get(bidId) ?? null;
         return {
           ...b,
-          summary: cacheMap.get(b.id) ?? b.summary ?? '-',
+          id: bidId,
+          summary: cacheMap.get(bidId) ?? b.summary ?? '-',
           bid_result: cachedResult ?? b.bid_result ?? null,
           // 기존 배지 렌더링(result_status/result_winner)을 위해 bid_result가 있으면 필드를 보조로 채움
           result_status: (cachedResult === '유찰' ? '유찰' : null) ?? b.result_status,
