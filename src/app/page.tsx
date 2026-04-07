@@ -218,6 +218,9 @@ export default function App() {
   const [editingManualPhoneId, setEditingManualPhoneId] = useState<string | null>(null);
   const [editingManualEmailId, setEditingManualEmailId] = useState<string | null>(null);
   const [selectedPipelineBidId, setSelectedPipelineBidId] = useState<string | null>(null);
+  const [editingSummaryBidId, setEditingSummaryBidId] = useState<string | null>(null);
+  const [editingSummaryDraft, setEditingSummaryDraft] = useState<string>('');
+  const summaryTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     const loadInitialData = async () => {
@@ -291,6 +294,73 @@ export default function App() {
   useEffect(() => {
     savedBidIdsRef.current = savedBidIds;
   }, [savedBidIds]);
+
+  const adjustSummaryTextareaHeight = () => {
+    const el = summaryTextareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.max(el.scrollHeight, 120)}px`;
+  };
+
+  const startEditingSummary = (bidId: string, currentSummary: any) => {
+    setEditingSummaryBidId(bidId);
+    setEditingSummaryDraft(String(currentSummary ?? ''));
+    // 다음 tick에서 높이 계산
+    setTimeout(() => adjustSummaryTextareaHeight(), 0);
+  };
+
+  const cancelEditingSummary = () => {
+    setEditingSummaryBidId(null);
+    setEditingSummaryDraft('');
+  };
+
+  const saveEditedSummary = async (bidId: string) => {
+    const nextSummary = String(editingSummaryDraft ?? '');
+    try {
+      // 1) cache DB 업데이트 (요구사항: UPDATE)
+      const { data: updatedRows, error: cacheUpErr } = await supabase
+        .from('ai_analysis_cache')
+        .update({ summary: nextSummary })
+        .eq('bid_id', bidId)
+        .select('bid_id');
+      if (cacheUpErr) throw cacheUpErr;
+
+      // 캐시가 아직 없던 케이스면 INSERT로 보완
+      if (!updatedRows || updatedRows.length === 0) {
+        const { error: cacheInsErr } = await supabase
+          .from('ai_analysis_cache')
+          .insert({ bid_id: bidId, summary: nextSummary });
+        if (cacheInsErr) throw cacheInsErr;
+      }
+
+      // 2) 파이프라인(saved_bids)에도 요약을 유지(탭 간 실시간 동기화)
+      if (savedBidIdsRef.current.has(bidId)) {
+        const { error: savedErr } = await supabase
+          .from('saved_bids')
+          .update({ summary: nextSummary })
+          .eq('bid_id', bidId);
+        if (savedErr) {
+          // cache는 성공했으므로 UI는 갱신하되, 파이프라인 DB 반영 실패는 로그만 남김
+          console.error('saved_bids summary update:', savedErr);
+        }
+      }
+
+      // 3) 전역 상태 즉시 반영 (대시보드/파이프라인 동기화)
+      setBids((prev) => {
+        const next = (prev ?? []).map((b) => (b.id === bidId ? { ...b, summary: nextSummary } : b));
+        bidsRef.current = next;
+        return next;
+      });
+      setSelectedBid((prev) => (prev && prev.id === bidId ? { ...prev, summary: nextSummary } : prev));
+      setSavedBidsData((prev) => (prev ?? []).map((r) => (r.bid_id === bidId ? { ...r, summary: nextSummary } : r)));
+
+      showToast('AI 요약이 저장되었습니다.');
+      cancelEditingSummary();
+    } catch (e) {
+      console.error('saveEditedSummary:', e);
+      showToast('요약 저장에 실패했습니다.');
+    }
+  };
 
   const toggleAnalyzedStatus = async (bidId: string) => {
     const isAnalyzed = analyzedBidIds.has(bidId);
@@ -1459,16 +1529,79 @@ export default function App() {
                     <div className="mb-6">
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-2 text-indigo-600"><FileText className="w-3.5 h-3.5" /><span className="text-[10px] font-black uppercase tracking-widest">과업 내용 상세정리</span></div>
-                        <span className="text-[10px] text-slate-400 font-medium">클릭 시 전체 보기</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-slate-400 font-medium">클릭 시 전체 보기</span>
+                          {selectedBid?.id && editingSummaryBidId !== selectedBid.id ? (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                startEditingSummary(selectedBid.id, selectedBid.summary);
+                              }}
+                              className="px-2 py-1 rounded-lg text-[10px] font-black border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                            >
+                              편집
+                            </button>
+                          ) : null}
+                        </div>
                       </div>
                       <div
                         role="button"
                         tabIndex={0}
-                        onClick={() => setSummaryModalOpen(true)}
-                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSummaryModalOpen(true); } }}
+                        onClick={() => {
+                          if (selectedBid?.id && editingSummaryBidId === selectedBid.id) return;
+                          setSummaryModalOpen(true);
+                        }}
+                        onKeyDown={(e) => {
+                          if (selectedBid?.id && editingSummaryBidId === selectedBid.id) return;
+                          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSummaryModalOpen(true); }
+                        }}
                         className="w-full text-left text-xs text-slate-600 leading-relaxed font-medium bg-indigo-50/30 p-4 rounded-xl border border-indigo-100/30 break-words [&>strong]:font-bold [&>strong]:text-slate-800 max-h-80 overflow-y-auto cursor-pointer hover:bg-indigo-50/50 hover:border-indigo-200/50 transition-colors"
                       >
-                        <div dangerouslySetInnerHTML={{ __html: renderSummaryHtml(selectedBid.summary) }} />
+                        {selectedBid?.id && editingSummaryBidId === selectedBid.id ? (
+                          <div
+                            className="space-y-2"
+                            onClick={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => e.stopPropagation()}
+                          >
+                            <textarea
+                              ref={summaryTextareaRef}
+                              value={editingSummaryDraft}
+                              onChange={(e) => {
+                                setEditingSummaryDraft(e.target.value);
+                                e.target.style.height = 'auto';
+                                e.target.style.height = `${Math.max(e.target.scrollHeight, 120)}px`;
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                              onMouseDown={(e) => e.stopPropagation()}
+                              className="w-full bg-white border border-slate-200 rounded-xl px-4 py-3 text-xs font-medium text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/25 focus:border-indigo-300 resize-y min-h-[120px]"
+                            />
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void saveEditedSummary(selectedBid.id);
+                                }}
+                                className="px-3 py-1.5 rounded-lg text-[10px] font-black bg-indigo-600 text-white hover:bg-indigo-700"
+                              >
+                                저장
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  cancelEditingSummary();
+                                }}
+                                className="px-3 py-1.5 rounded-lg text-[10px] font-black border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                              >
+                                취소
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div dangerouslySetInnerHTML={{ __html: renderSummaryHtml(selectedBid.summary) }} />
+                        )}
                       </div>
                     </div>
 
@@ -1834,15 +1967,70 @@ export default function App() {
                           ) : null}
                         </div>
                         <div className="rounded-2xl bg-indigo-50/95 border border-indigo-100/90 p-5 shadow-inner">
-                          <div className="flex items-center gap-2 mb-2">
+                          <div className="flex items-center justify-between gap-2 mb-2">
                             <FileText className="w-4 h-4 text-indigo-600 shrink-0" />
-                            <span className="text-[10px] font-black uppercase tracking-widest text-indigo-800">AI 분석 요약</span>
+                            <span className="text-[10px] font-black uppercase tracking-widest text-indigo-800 flex-1">AI 분석 요약</span>
+                            {editingSummaryBidId !== row.bid_id ? (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  startEditingSummary(row.bid_id, row.summary);
+                                }}
+                                className="px-2 py-1 rounded-lg text-[10px] font-black border border-indigo-200 bg-white text-indigo-700 hover:bg-indigo-50"
+                              >
+                                편집
+                              </button>
+                            ) : null}
                           </div>
-                          <div
-                            className="text-xs text-slate-700 leading-relaxed font-medium [&>strong]:font-bold [&>strong]:text-slate-900 max-h-52 overflow-y-auto cursor-zoom-in"
-                            onDoubleClick={() => setPipelineSummaryModalBidId(row.bid_id)}
-                            dangerouslySetInnerHTML={{ __html: renderSummaryHtml(row.summary) }}
-                          />
+                          {editingSummaryBidId === row.bid_id ? (
+                            <div
+                              className="space-y-2"
+                              onClick={(e) => e.stopPropagation()}
+                              onMouseDown={(e) => e.stopPropagation()}
+                            >
+                              <textarea
+                                ref={summaryTextareaRef}
+                                value={editingSummaryDraft}
+                                onChange={(e) => {
+                                  setEditingSummaryDraft(e.target.value);
+                                  e.target.style.height = 'auto';
+                                  e.target.style.height = `${Math.max(e.target.scrollHeight, 120)}px`;
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                onMouseDown={(e) => e.stopPropagation()}
+                                className="w-full bg-white border border-slate-200 rounded-xl px-4 py-3 text-xs font-medium text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/25 focus:border-indigo-300 resize-y min-h-[120px]"
+                              />
+                              <div className="flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void saveEditedSummary(row.bid_id);
+                                  }}
+                                  className="px-3 py-1.5 rounded-lg text-[10px] font-black bg-indigo-600 text-white hover:bg-indigo-700"
+                                >
+                                  저장
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    cancelEditingSummary();
+                                  }}
+                                  className="px-3 py-1.5 rounded-lg text-[10px] font-black border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                                >
+                                  취소
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div
+                              className="text-xs text-slate-700 leading-relaxed font-medium [&>strong]:font-bold [&>strong]:text-slate-900 max-h-52 overflow-y-auto cursor-zoom-in"
+                              onDoubleClick={() => setPipelineSummaryModalBidId(row.bid_id)}
+                              dangerouslySetInnerHTML={{ __html: renderSummaryHtml(row.summary) }}
+                            />
+                          )}
                         </div>
                         <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/80 p-4">
                           <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1.5 block">
