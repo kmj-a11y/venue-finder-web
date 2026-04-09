@@ -1288,39 +1288,75 @@ export default function App() {
 
   const toggleSaveBid = async (e, bid) => {
     e.stopPropagation();
-    const isSaved = savedBidIds.has(bid.id);
+    const resolvedId = normalizeBidId(bid.id);
+    const isSaved =
+      savedBidIds.has(resolvedId) ||
+      savedBidIds.has(bid.id) ||
+      [...savedBidIds].some((id) => normalizeBidId(id) === resolvedId);
     try {
       if (isSaved) {
-        const { error } = await supabase.from('saved_bids').delete().eq('bid_id', bid.id);
+        const { error } = await supabase.from('saved_bids').delete().eq('bid_id', resolvedId);
         if (error) throw error;
         setSavedBidIds((prev) => {
-          const next = new Set(prev);
-          next.delete(bid.id);
+          const next = new Set<string>();
+          for (const id of prev) {
+            if (normalizeBidId(id) !== resolvedId) next.add(id);
+          }
           return next;
         });
-        setSavedBidsData((prev) => prev.filter((r) => r.bid_id !== bid.id));
+        setSavedBidsData((prev) =>
+          prev.filter((r) => normalizeBidId(r.bid_id) !== resolvedId)
+        );
         showToast('보관함에서 제거되었습니다.');
       } else {
-        const existing = savedBidsData.find((r) => r.bid_id === bid.id);
+        const latestFromBids = (bids ?? []).find((b) => normalizeBidId(b.id) === resolvedId);
+        const mergedBid = { ...bid, ...(latestFromBids ?? {}), id: resolvedId };
+
+        // 대시보드에서 편집한 요약은 bids(최신 목록)에 반영됨 — 인자로 받은 bid는 stale일 수 있어 bids 우선
+        let summaryForSave =
+          latestFromBids != null ? (latestFromBids.summary ?? '-') : mergedBid.summary ?? bid.summary ?? '-';
+
+        if (
+          summaryForSave == null ||
+          summaryForSave === '-' ||
+          String(summaryForSave).trim() === ''
+        ) {
+          const { data: cacheRows } = await supabase
+            .from('ai_analysis_cache')
+            .select('summary')
+            .in('bid_id', bidIdVariantsForLookup(resolvedId))
+            .limit(1);
+          const sc = cacheRows?.[0]?.summary;
+          if (sc != null && String(sc).trim() !== '') {
+            summaryForSave = String(sc);
+          }
+        }
+        if (summaryForSave == null || String(summaryForSave).trim() === '') {
+          summaryForSave = '-';
+        }
+
+        const existing = savedBidsData.find(
+          (r) => normalizeBidId(r.bid_id) === resolvedId
+        );
         const row = {
-          bid_id: bid.id,
-          title: bid.title ?? '',
-          org: bid.org ?? '',
-          notice_date: bid.noticeDate ?? null,
-          deadline: bid.deadline ?? null,
-          budget: bid.budget ?? '',
-          status: bid.status ?? '',
-          summary: bid.summary ?? '-',
-          phone: bid.phone ?? null,
-          email: bid.email ?? null,
+          bid_id: resolvedId,
+          title: mergedBid.title ?? '',
+          org: mergedBid.org ?? '',
+          notice_date: mergedBid.noticeDate ?? null,
+          deadline: mergedBid.deadline ?? null,
+          budget: mergedBid.budget ?? '',
+          status: mergedBid.status ?? '',
+          summary: summaryForSave,
+          phone: mergedBid.phone ?? null,
+          email: mergedBid.email ?? null,
           memo: existing?.memo ?? '',
           is_emailed: existing?.is_emailed ?? false,
         };
         const { error } = await supabase.from('saved_bids').upsert(row, { onConflict: 'bid_id' });
         if (error) throw error;
-        setSavedBidIds((prev) => new Set(prev).add(bid.id));
+        setSavedBidIds((prev) => new Set(prev).add(resolvedId));
         setSavedBidsData((prev) => {
-          const others = prev.filter((r) => r.bid_id !== bid.id);
+          const others = prev.filter((r) => normalizeBidId(r.bid_id) !== resolvedId);
           return [...others, row].sort((a, b) =>
             compareBidsByNoticeDesc(
               { noticeDate: a.notice_date },
