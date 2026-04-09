@@ -10,6 +10,22 @@ export const MAX_DOCUMENT_CHARS = 15_000;
 
 const cloudConvert = new CloudConvert(process.env.CLOUDCONVERT_API_KEY || '');
 
+const PAYMENT_LIMIT_MESSAGE = 'API 무료 한도가 초과되었습니다. API Key를 교체해 주세요.';
+
+function isPaymentRequiredError(error: unknown): boolean {
+  const e = error as {
+    response?: { status?: number };
+    status?: number;
+    statusCode?: number;
+    code?: number | string;
+    message?: string;
+  };
+  if (e?.response?.status === 402 || e?.status === 402 || e?.statusCode === 402) return true;
+  if (e?.code === 402 || e?.code === '402') return true;
+  const msg = typeof e?.message === 'string' ? e.message : '';
+  return /402|payment\s*required|payment_required/i.test(msg);
+}
+
 function normalizeHwpxXmlToMarkdown(xmlContent: string): string {
   // HWPX(= 내부 XML)에서 표/문단 구조를 최대한 보존하기 위해 마크다운 형태로 변환한다.
   return xmlContent
@@ -406,6 +422,9 @@ ${combinedIntermediate}`;
     return NextResponse.json({ bid: updatedBid });
   } catch (error) {
     console.error('analyze API error:', error);
+    if (isPaymentRequiredError(error)) {
+      return NextResponse.json({ error: PAYMENT_LIMIT_MESSAGE }, { status: 402 });
+    }
     const message =
       error instanceof Error
         ? error.message

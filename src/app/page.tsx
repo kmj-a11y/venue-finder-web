@@ -119,6 +119,16 @@ function bidIdVariantsForLookup(bidId: any): string[] {
   return Array.from(out);
 }
 
+/** 요약 문자열: 첫 번째 유효값(빈 문자열·'-' 제외) */
+function pickFirstNonEmptySummary(...parts: unknown[]): string {
+  for (const p of parts) {
+    if (p == null) continue;
+    const s = String(p).trim();
+    if (s !== '' && s !== '-') return s;
+  }
+  return '-';
+}
+
 /** 공고 게시일(noticeDate YYYY-MM-DD)이 헤더에서 선택한 월(YYYY-MM)과 일치하는지 */
 function bidNoticeInSelectedMonth(bid: any, monthYm: string) {
   const nd = bid?.noticeDate;
@@ -201,7 +211,6 @@ export default function App() {
   const [savedBidIds, setSavedBidIds] = useState(new Set()); 
   const [savedBidsData, setSavedBidsData] = useState<any[]>([]);
   const [analyzedBidIds, setAnalyzedBidIds] = useState<Set<string>>(new Set());
-  const [ccQuota, setCcQuota] = useState<number | null>(null);
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [summaryModalOpen, setSummaryModalOpen] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -275,10 +284,6 @@ export default function App() {
 
     loadInitialData();
     handleRefresh(true);
-  }, []);
-
-  useEffect(() => {
-    fetchQuota();
   }, []);
 
   // 월 이동 시에도 목록을 다시 불러오며(캐시 병합 포함), 결과가 즉시 박힌 상태로 보이게 함
@@ -597,33 +602,6 @@ export default function App() {
   const showToast = (msg) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(''), 3000);
-  };
-
-  const fetchQuota = async () => {
-    try {
-      const res = await fetch('/api/quota', { cache: 'no-store' });
-      if (!res.ok) {
-        console.error('fetchQuota: 응답 비정상 status=', res.status);
-        setCcQuota(null);
-        return;
-      }
-      let data: { credits?: number | null; error?: string };
-      try {
-        data = await res.json();
-      } catch (parseErr) {
-        console.error('fetchQuota: JSON 파싱 실패', parseErr);
-        setCcQuota(null);
-        return;
-      }
-      if (typeof data?.credits === 'number') {
-        setCcQuota(data.credits);
-      } else {
-        setCcQuota(null);
-      }
-    } catch (err) {
-      console.error('fetchQuota: 네트워크/예외', err);
-      setCcQuota(null);
-    }
   };
 
   /** `/api/result` 응답으로부터 캐시용 bid_result 문자열 생성 (승자명 우선, 없으면 유찰) */
@@ -1226,7 +1204,9 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok) {
-        const errMsg = data?.error ?? '업로드 기반 AI 분석에 실패했습니다.';
+        const paymentMsg = 'API 무료 한도가 초과되었습니다. API Key를 교체해 주세요.';
+        const errMsg =
+          res.status === 402 ? paymentMsg : (data?.error ?? '업로드 기반 AI 분석에 실패했습니다.');
         const failSummary = `⚠️ 분석 실패: ${errMsg}`;
         showToast(errMsg);
         // 선택된 공고 및 리스트 상의 요약을 명시적으로 실패 메시지로 교체
@@ -1273,7 +1253,6 @@ export default function App() {
       } else {
         showToast('업로드한 첨부파일 기준으로 AI 재분석이 완료되었습니다.');
       }
-      void fetchQuota();
     } catch (err) {
       console.error('handleUploadAnalyze error:', err);
       showToast('업로드 기반 AI 분석 중 오류가 발생했습니다.');
@@ -1311,29 +1290,24 @@ export default function App() {
       } else {
         const latestFromBids = (bids ?? []).find((b) => normalizeBidId(b.id) === resolvedId);
         const mergedBid = { ...bid, ...(latestFromBids ?? {}), id: resolvedId };
+        const idMatchSelected =
+          selectedBid != null && normalizeBidId(selectedBid.id) === resolvedId;
 
-        // 대시보드에서 편집한 요약은 bids(최신 목록)에 반영됨 — 인자로 받은 bid는 stale일 수 있어 bids 우선
-        let summaryForSave =
-          latestFromBids != null ? (latestFromBids.summary ?? '-') : mergedBid.summary ?? bid.summary ?? '-';
+        const { data: cacheRows } = await supabase
+          .from('ai_analysis_cache')
+          .select('summary')
+          .in('bid_id', bidIdVariantsForLookup(resolvedId))
+          .limit(1);
+        const cacheSummary = cacheRows?.[0]?.summary;
 
-        if (
-          summaryForSave == null ||
-          summaryForSave === '-' ||
-          String(summaryForSave).trim() === ''
-        ) {
-          const { data: cacheRows } = await supabase
-            .from('ai_analysis_cache')
-            .select('summary')
-            .in('bid_id', bidIdVariantsForLookup(resolvedId))
-            .limit(1);
-          const sc = cacheRows?.[0]?.summary;
-          if (sc != null && String(sc).trim() !== '') {
-            summaryForSave = String(sc);
-          }
-        }
-        if (summaryForSave == null || String(summaryForSave).trim() === '') {
-          summaryForSave = '-';
-        }
+        // 우선순위: 우측 패널 선택 공고(편집 직후) → 목록 최신 행 → DB 캐시 → 병합/원본
+        const summaryForSave = pickFirstNonEmptySummary(
+          idMatchSelected ? selectedBid?.summary : null,
+          latestFromBids?.summary,
+          cacheSummary,
+          mergedBid.summary,
+          bid.summary
+        );
 
         const existing = savedBidsData.find(
           (r) => normalizeBidId(r.bid_id) === resolvedId
@@ -1956,27 +1930,6 @@ export default function App() {
                           )}
                         </button>
                       </div>
-                    </div>
-
-                    <div className="mb-6">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2">
-                          <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-[16px]">☁️</div>
-                          <div>
-                            <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">HWP 자동 변환 무료 크레딧</p>
-                            <p className="text-xs font-semibold text-slate-700 mt-0.5">CloudConvert 남은 일일 한도</p>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-2xl font-black text-indigo-600 leading-none">
-                            {ccQuota == null ? '로딩중…' : ccQuota}
-                          </div>
-                          <div className="text-[10px] font-bold text-slate-400 mt-0.5">credits</div>
-                        </div>
-                      </div>
-                      <p className="text-[11px] text-slate-400 font-medium">
-                        * CloudConvert 무료 전환 한도는 계정 정책 기준(현재 일 최대 10회) · `credits`는 남은 변환 크레딧입니다.
-                      </p>
                     </div>
 
                     <div className="mb-6">
