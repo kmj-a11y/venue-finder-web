@@ -1572,7 +1572,8 @@ export default function App() {
     return true;
   });
 
-  const pipelineSorted = [...savedBidsData].sort((a, b) =>
+  const pipelineSorted = [...savedBidsData]
+    .sort((a, b) =>
     compareBidsByNoticeDesc(
       { noticeDate: a.notice_date },
       { noticeDate: b.notice_date }
