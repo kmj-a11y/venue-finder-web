@@ -1230,8 +1230,8 @@ export default function App() {
       if (!res.ok) {
         const paymentMsg = 'API 무료 한도가 초과되었습니다. API Key를 교체해 주세요.';
         const timeoutMsg =
-          '서버 처리 시간이 초과되었습니다(504). CloudConvert·Gemini 변환이 길면 흔합니다. ' +
-          'Vercel 무료 플랜은 함수 실행이 약 10초로 제한되어 중단될 수 있으니, 더 짧은 파일로 시도하거나 Pro 플랜에서 실행 시간을 늘려 주세요.';
+          '서버 처리 시간이 초과되었습니다(504). ' +
+          'CloudConvert(HWP 변환)·Gemini 호출이 길어졌습니다. Vercel Functions 설정에서 Fluid Compute가 켜져 있는지, analyze 라우트의 maxDuration이 충분한지 확인해 주세요.';
         const gatewayMsg =
           res.status === 502 || res.status === 503
             ? '일시적으로 분석 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.'
