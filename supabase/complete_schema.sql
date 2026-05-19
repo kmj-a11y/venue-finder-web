@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS public.saved_bids (
   -- 개찰/결과 (sync-past, 목록 연동)
   result_status TEXT,
   result_winner TEXT,
+  -- 목록/패널 병합용 단일 문자열(낙찰자명 또는 '유찰') — page.tsx 가 읽음
+  bid_result TEXT,
   -- UI 표시용(선택)
   notice_number TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -71,6 +73,9 @@ CREATE INDEX IF NOT EXISTS idx_saved_bids_notice_date ON public.saved_bids (noti
 CREATE INDEX IF NOT EXISTS idx_saved_bids_updated_at ON public.saved_bids (updated_at DESC);
 
 COMMENT ON TABLE public.saved_bids IS '북마크(보관함) 및 영업 파이프라인 행';
+
+-- 이미 예전 스키마로 테이블만 만든 경우: 컬럼만 보강
+ALTER TABLE public.saved_bids ADD COLUMN IF NOT EXISTS bid_result TEXT;
 
 -- ---------------------------------------------------------------------------
 -- 4) 대시보드「분석 완료」토글 (공고별, 보관 여부와 무관)
@@ -96,6 +101,19 @@ CREATE INDEX IF NOT EXISTS idx_ai_analysis_cache_updated_at ON public.ai_analysi
 COMMENT ON TABLE public.ai_analysis_cache IS '공고별 AI 요약 캐시 (handleRefresh 시 병합)';
 
 -- ---------------------------------------------------------------------------
+-- 5b) 나라장터 개찰 결과 로컬 캐시 (page.tsx handleRefresh·선택 공고)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.g2b_result_cache (
+  bid_id TEXT PRIMARY KEY,
+  bid_result TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_g2b_result_cache_updated_at ON public.g2b_result_cache (updated_at DESC);
+
+COMMENT ON TABLE public.g2b_result_cache IS '개찰 결과(낙찰자명 또는 유찰) 캐시 — AI 요약(ai_analysis_cache)과 별도';
+
+-- ---------------------------------------------------------------------------
 -- RLS (anon 키 사용 시 — 기존 프로젝트와 동일하게 개발 편의용 전체 허용)
 -- 프로덕션에서는 정책을 auth·서비스 롤 기준으로 좁히는 것을 권장합니다.
 -- ---------------------------------------------------------------------------
@@ -104,6 +122,7 @@ ALTER TABLE public.prompts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.saved_bids ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.analyzed_bids ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.ai_analysis_cache ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.g2b_result_cache ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Allow all for app_settings" ON public.app_settings;
 CREATE POLICY "Allow all for app_settings"
@@ -128,6 +147,11 @@ CREATE POLICY "Allow all for analyzed_bids"
 DROP POLICY IF EXISTS "Allow all for ai_analysis_cache" ON public.ai_analysis_cache;
 CREATE POLICY "Allow all for ai_analysis_cache"
   ON public.ai_analysis_cache FOR ALL
+  USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all for g2b_result_cache" ON public.g2b_result_cache;
+CREATE POLICY "Allow all for g2b_result_cache"
+  ON public.g2b_result_cache FOR ALL
   USING (true) WITH CHECK (true);
 
 -- ---------------------------------------------------------------------------
@@ -161,6 +185,11 @@ CREATE TRIGGER trg_saved_bids_updated_at
 DROP TRIGGER IF EXISTS trg_ai_analysis_cache_updated_at ON public.ai_analysis_cache;
 CREATE TRIGGER trg_ai_analysis_cache_updated_at
   BEFORE UPDATE ON public.ai_analysis_cache
+  FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_g2b_result_cache_updated_at ON public.g2b_result_cache;
+CREATE TRIGGER trg_g2b_result_cache_updated_at
+  BEFORE UPDATE ON public.g2b_result_cache
   FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
 
 -- ---------------------------------------------------------------------------

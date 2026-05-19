@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS saved_bids (
   email TEXT,
   memo TEXT NOT NULL DEFAULT '',
   is_emailed BOOLEAN NOT NULL DEFAULT FALSE,
+  bid_result TEXT,
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 

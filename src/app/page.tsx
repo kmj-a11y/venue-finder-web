@@ -30,6 +30,19 @@ function yyyyMmKstToday() {
   return s.split(' ')[0].slice(0, 7);
 }
 
+/** PostgREST 오류가 Next 오버레이에서 `{}`로만 보일 때 대비 */
+function logSupabaseErr(label, err) {
+  if (err == null) {
+    console.error(label, '(null)');
+    return;
+  }
+  const msg = err.message ?? String(err);
+  const parts = [err.code && `code=${err.code}`, err.details && `details=${err.details}`, err.hint && `hint=${err.hint}`].filter(
+    Boolean
+  );
+  console.error(label, msg, parts.length ? `| ${parts.join(' | ')}` : '');
+}
+
 /** 게시일 문자열 기준 최신순 정렬 */
 function compareBidsByNoticeDesc(a: any, b: any) {
   const da = String(a.noticeDate ?? '').replace(/\D/g, '');
@@ -302,11 +315,11 @@ export default function App() {
         ]);
       if (cancelled) return;
       if (savedErr) {
-        console.error('saved_bids load error:', savedErr);
+        logSupabaseErr('saved_bids load error:', savedErr);
         return;
       }
       if (analyzedErr) {
-        console.error('analyzed_bids load error:', analyzedErr);
+        logSupabaseErr('analyzed_bids load error:', analyzedErr);
       }
       const rows = savedRows ?? [];
       setSavedBidsData(rows);
@@ -374,7 +387,7 @@ export default function App() {
           .eq('bid_id', bidId);
         if (savedErr) {
           // cache는 성공했으므로 UI는 갱신하되, 파이프라인 DB 반영 실패는 로그만 남김
-          console.error('saved_bids summary update:', savedErr);
+          logSupabaseErr('saved_bids summary update:', savedErr);
         }
       }
 
@@ -476,7 +489,7 @@ export default function App() {
           .maybeSingle();
         if (cancelled) return;
         if (cacheErr) {
-          console.error('g2b_result_cache lookup:', cacheErr);
+          logSupabaseErr('g2b_result_cache lookup:', cacheErr);
         }
         const cachedBidResult =
           cached?.bid_result != null && String(cached.bid_result).trim() !== ''
@@ -533,7 +546,7 @@ export default function App() {
           const { error: upErr } = await supabase
             .from('g2b_result_cache')
             .upsert({ bid_id: selectedBid.id, bid_result: bidResultStr }, { onConflict: 'bid_id' });
-          if (upErr) console.error('g2b_result_cache upsert (selectedBid):', upErr);
+          if (upErr) logSupabaseErr('g2b_result_cache upsert (selectedBid):', upErr);
         }
 
         if (savedBidIdsRef.current.has(selectedBid.id)) {
@@ -546,7 +559,7 @@ export default function App() {
               status: selectedBid.status,
             })
             .eq('bid_id', selectedBid.id);
-          if (savedErr) console.error('saved_bids result update (selectedBid):', savedErr);
+          if (savedErr) logSupabaseErr('saved_bids result update (selectedBid):', savedErr);
           else {
             setSavedBidsData((prev) =>
               (prev ?? []).map((r) =>
@@ -648,8 +661,8 @@ export default function App() {
             supabase.from('g2b_result_cache').select('bid_id, bid_result').in('bid_id', candidateIds),
             supabase.from('saved_bids').select('bid_id, bid_result').in('bid_id', candidateIds),
           ]);
-        if (cacheErr) console.error('refreshResultsForSelectedMonth g2b_result_cache check:', cacheErr);
-        if (savedErr) console.error('refreshResultsForSelectedMonth saved_bids check:', savedErr);
+        if (cacheErr) logSupabaseErr('refreshResultsForSelectedMonth g2b_result_cache check:', cacheErr);
+        if (savedErr) logSupabaseErr('refreshResultsForSelectedMonth saved_bids check:', savedErr);
         (cacheRows ?? []).forEach((r: any) => {
           const v = r?.bid_result != null ? String(r.bid_result).trim() : '';
           if (r?.bid_id && v) idsWithDbResult.add(String(r.bid_id));
@@ -683,7 +696,7 @@ export default function App() {
                   .from('g2b_result_cache')
                   .upsert({ bid_id: bid.id, bid_result: bidResultStr }, { onConflict: 'bid_id' });
                 if (cacheErr) {
-                  console.error('g2b_result_cache upsert:', cacheErr);
+                  logSupabaseErr('g2b_result_cache upsert:', cacheErr);
                 }
               }
 
@@ -724,7 +737,7 @@ export default function App() {
                   })
                   .eq('bid_id', bid.id);
                 if (upErr) {
-                  console.error('saved_bids partial result update error:', upErr);
+                  logSupabaseErr('saved_bids partial result update error:', upErr);
                 } else {
                   setSavedBidsData((prev) =>
                     prev.map((r) =>
@@ -877,10 +890,11 @@ export default function App() {
       const bidIds = filteredBids.map((b) => normalizeBidId(b.id)).filter(Boolean);
       const cacheMap = new Map();
       if (bidIds.length > 0) {
-        const { data: cacheRows } = await supabase
+        const { data: cacheRows, error: aiCacheErr } = await supabase
           .from('ai_analysis_cache')
           .select('bid_id, summary')
           .in('bid_id', Array.from(new Set(bidIds.flatMap(bidIdVariantsForLookup))));
+        if (aiCacheErr) logSupabaseErr('ai_analysis_cache load error:', aiCacheErr);
         (cacheRows ?? []).forEach((r) => {
           if (r.bid_id != null && r.summary != null) cacheMap.set(normalizeBidId(r.bid_id), String(r.summary));
         });
@@ -897,8 +911,8 @@ export default function App() {
             supabase.from('saved_bids').select('bid_id, bid_result').in('bid_id', lookupIds),
           ]);
 
-        if (resultErr) console.error('g2b_result_cache load error:', resultErr);
-        if (savedErr) console.error('saved_bids result load error:', savedErr);
+        if (resultErr) logSupabaseErr('g2b_result_cache load error:', resultErr);
+        if (savedErr) logSupabaseErr('saved_bids result load error:', savedErr);
 
         (resultRows ?? []).forEach((r: any) => {
           if (r?.bid_id != null && r?.bid_result != null) {
@@ -921,7 +935,7 @@ export default function App() {
           const { error: backfillErr } = await supabase
             .from('g2b_result_cache')
             .upsert(backfill, { onConflict: 'bid_id' });
-          if (backfillErr) console.error('g2b_result_cache backfill from saved_bids:', backfillErr);
+          if (backfillErr) logSupabaseErr('g2b_result_cache backfill from saved_bids:', backfillErr);
           backfill.forEach((r) => resultMap.set(String(r.bid_id), String(r.bid_result)));
         }
       }
@@ -1202,11 +1216,35 @@ export default function App() {
         method: 'POST',
         body: formData,
       });
-      const data = await res.json();
+      const rawText = await res.text();
+      let data: { error?: string; bid?: typeof selectedBid } | null = null;
+      const trimmed = rawText.trim();
+      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        try {
+          data = JSON.parse(trimmed) as typeof data;
+        } catch {
+          data = null;
+        }
+      }
+
       if (!res.ok) {
         const paymentMsg = 'API 무료 한도가 초과되었습니다. API Key를 교체해 주세요.';
+        const timeoutMsg =
+          '서버 처리 시간이 초과되었습니다(504). CloudConvert·Gemini 변환이 길면 흔합니다. ' +
+          'Vercel 무료 플랜은 함수 실행이 약 10초로 제한되어 중단될 수 있으니, 더 짧은 파일로 시도하거나 Pro 플랜에서 실행 시간을 늘려 주세요.';
+        const gatewayMsg =
+          res.status === 502 || res.status === 503
+            ? '일시적으로 분석 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.'
+            : null;
         const errMsg =
-          res.status === 402 ? paymentMsg : (data?.error ?? '업로드 기반 AI 분석에 실패했습니다.');
+          res.status === 402
+            ? paymentMsg
+            : res.status === 504
+              ? timeoutMsg
+              : gatewayMsg ??
+                (typeof data?.error === 'string' && data.error.trim()
+                  ? data.error
+                  : '업로드 기반 AI 분석에 실패했습니다.');
         const failSummary = `⚠️ 분석 실패: ${errMsg}`;
         showToast(errMsg);
         // 선택된 공고 및 리스트 상의 요약을 명시적으로 실패 메시지로 교체
