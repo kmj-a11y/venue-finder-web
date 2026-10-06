@@ -8,6 +8,10 @@ import {
   Key, Archive, Bookmark, BookmarkCheck, CheckCircle2, List, Loader2
 } from 'lucide-react';
 
+/** PC에서 도는 HWP→PDF 변환기(local-converter) 주소 */
+const LOCAL_CONVERTER_URL = 'http://127.0.0.1:5555';
+const DOWNLOAD_FOLDER_STORAGE_KEY = 'vf.downloadFolder';
+
 /** 공고명에 공백/붙여쓰기 관계없이 '채용대행' 또는 '채용위탁' 용역만 표시 */
 function isRecruitmentAgencyBidTitle(title: string | undefined | null): boolean {
   if (!title || typeof title !== 'string') return false;
@@ -227,6 +231,13 @@ export default function App() {
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [summaryModalOpen, setSummaryModalOpen] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+
+  // 공고 첨부 일괄 다운로드 (PC에서 도는 local-converter 연동)
+  const [downloadSelectedIds, setDownloadSelectedIds] = useState<Set<string>>(new Set());
+  const [isBulkDownloading, setIsBulkDownloading] = useState(false);
+  const [downloadFolder, setDownloadFolder] = useState('');
+  const [converterStatus, setConverterStatus] = useState('');
+  const [converterDefaultFolder, setConverterDefaultFolder] = useState('');
 
   const [geminiApiKey, setGeminiApiKey] = useState('');
   const [prompts, setPrompts] = useState([
@@ -615,6 +626,111 @@ export default function App() {
   const showToast = (msg) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(''), 3000);
+  };
+
+  // 다운로드 폴더 경로는 PC마다 달라서 이 브라우저(localStorage)에만 저장한다.
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(DOWNLOAD_FOLDER_STORAGE_KEY);
+      if (saved) setDownloadFolder(saved);
+    } catch {
+      /* 저장소 접근 불가 시 기본 폴더 사용 */
+    }
+  }, []);
+
+  const updateDownloadFolder = (value: string) => {
+    setDownloadFolder(value);
+    try {
+      window.localStorage.setItem(DOWNLOAD_FOLDER_STORAGE_KEY, value);
+    } catch {
+      /* 저장 실패해도 이번 세션에는 적용됨 */
+    }
+  };
+
+  const toggleDownloadSelect = (bidId: string) => {
+    setDownloadSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(bidId)) next.delete(bidId);
+      else next.add(bidId);
+      return next;
+    });
+  };
+
+  const toggleDownloadSelectAll = (checked: boolean, ids: string[]) => {
+    setDownloadSelectedIds((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => (checked ? next.add(id) : next.delete(id)));
+      return next;
+    });
+  };
+
+  const checkConverter = async () => {
+    setConverterStatus('확인 중...');
+    try {
+      const res = await fetch(`${LOCAL_CONVERTER_URL}/health`, { cache: 'no-store' });
+      const data = await res.json();
+      setConverterDefaultFolder(data?.defaultFolder ?? '');
+      setConverterStatus(`연결됨 · v${data?.version ?? '?'}`);
+    } catch (err) {
+      console.error('local converter health:', err);
+      setConverterStatus('연결 안 됨 · PC에서 local-converter의 start.bat을 실행해 주세요');
+    }
+  };
+
+  /** 체크한 공고의 첨부를 PC 변환기로 보내 기관명/공고명 폴더에 받고 HWP·HWPX를 PDF로 바꾼다 */
+  const handleBulkDownload = async () => {
+    const targets = bids.filter((b) => downloadSelectedIds.has(b.id));
+    if (targets.length === 0) {
+      showToast('다운로드할 공고를 먼저 체크해 주세요.');
+      return;
+    }
+    const withFiles = targets.filter((b) => (b.files ?? []).length > 0);
+    const noFiles = targets.length - withFiles.length;
+    if (withFiles.length === 0) {
+      showToast('체크한 공고에 첨부파일이 없습니다.');
+      return;
+    }
+
+    setIsBulkDownloading(true);
+    try {
+      const res = await fetch(`${LOCAL_CONVERTER_URL}/download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseFolder: downloadFolder.trim(),
+          convert: true,
+          deleteOriginal: true,
+          openFolder: true,
+          bids: withFiles.map((b) => ({
+            id: b.id,
+            org: b.org,
+            title: b.title,
+            files: (b.files ?? []).map((f) => ({ name: f.name, url: f.url })),
+          })),
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok) {
+        showToast(`다운로드 실패: ${data?.error ?? `HTTP ${res.status}`}`);
+        return;
+      }
+
+      const conv = data.conversion;
+      const parts = [`공고 ${withFiles.length}건`, `파일 ${data.downloaded}개 받음`];
+      if (data.skipped) parts.push(`${data.skipped}개는 이미 있음`);
+      if (conv?.success) parts.push(`PDF 변환 ${conv.success}개`);
+      if (conv && conv.ok === false) parts.push(`PDF 변환 오류: ${conv.error}`);
+      const fails = (data.failed ?? 0) + (conv?.failed ?? 0);
+      if (fails) parts.push(`실패 ${fails}개 (변환기 로그 확인)`);
+      if (noFiles) parts.push(`첨부 없는 공고 ${noFiles}건 제외`);
+      showToast(parts.join(' · '));
+      if (fails === 0 && conv?.ok !== false) setDownloadSelectedIds(new Set());
+    } catch (err) {
+      console.error('bulk download:', err);
+      showToast('PDF 변환기에 연결할 수 없습니다. PC 트레이의 변환기(start.bat)가 켜져 있는지 확인해 주세요.');
+    } finally {
+      setIsBulkDownloading(false);
+    }
   };
 
   /** `/api/result` 응답으로부터 캐시용 bid_result 문자열 생성 (승자명 우선, 없으면 유찰) */
@@ -1692,7 +1808,24 @@ export default function App() {
       {activeTab === 'dashboard' ? (
         <main className="flex flex-1 overflow-hidden w-full h-full">
           <div className="flex-1 h-full overflow-y-auto p-6 scrollbar-hide">
-            <div className="bg-slate-50 border border-slate-200 rounded-2xl px-6 py-3 flex items-center justify-end relative z-20 mb-4">
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl px-6 py-3 flex items-center justify-between relative z-20 mb-4">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void handleBulkDownload()}
+                  disabled={isBulkDownloading || downloadSelectedIds.size === 0}
+                  title="체크한 공고의 첨부파일을 기관명/공고명 폴더로 받고 HWP·HWPX를 PDF로 변환합니다"
+                  className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {isBulkDownloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                  {isBulkDownloading ? '다운로드·변환 중...' : `선택 공고 다운로드 + PDF 변환 (${downloadSelectedIds.size})`}
+                </button>
+                {downloadSelectedIds.size > 0 && !isBulkDownloading && (
+                  <button type="button" onClick={() => setDownloadSelectedIds(new Set())} className="text-[11px] font-bold text-slate-500 hover:text-slate-700">
+                    선택 해제
+                  </button>
+                )}
+              </div>
               <div className="flex bg-slate-200 p-0.5 rounded-lg border border-slate-300">
                 <button onClick={() => setShowSavedOnly(false)} className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[11px] font-bold transition-all ${!showSavedOnly ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><List className="w-3 h-3" /> 전체 공고</button>
                 <button onClick={() => setShowSavedOnly(true)} className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[11px] font-bold transition-all ${showSavedOnly ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Bookmark className="w-3 h-3" /> 보관함 ({savedBidIds.size})</button>
@@ -1715,6 +1848,15 @@ export default function App() {
                 <table className="w-full text-left border-separate border-spacing-0">
                   <thead className="bg-slate-50 sticky top-0 z-10">
                     <tr>
+                      <th className="pl-5 pr-1 py-3 w-8 border-b border-slate-100">
+                        <input
+                          type="checkbox"
+                          title="보이는 공고 전체 선택 (다운로드용)"
+                          checked={filteredBids.length > 0 && filteredBids.every((b) => downloadSelectedIds.has(b.id))}
+                          onChange={(e) => toggleDownloadSelectAll(e.target.checked, filteredBids.map((b) => b.id))}
+                          className="w-4 h-4 accent-emerald-600 cursor-pointer"
+                        />
+                      </th>
                       <th className="px-5 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100"></th>
                       <th className="px-5 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100">공고 정보 / 기관</th>
                       <th className="px-5 py-3 text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 text-center">일정 및 상태</th>
@@ -1732,6 +1874,15 @@ export default function App() {
                             onClick={() => handleSelectBidRow(bid)}
                             className={`group cursor-pointer transition-colors ${selectedBid?.id === bid.id ? 'bg-indigo-50/50' : hasRealSummary(bid) ? 'bg-yellow-50' : 'bg-white'} ${isAnalyzed ? 'opacity-70' : ''} hover:opacity-90`}
                           >
+                            <td className="pl-5 pr-1 py-4 w-8" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                title="다운로드 대상으로 선택"
+                                checked={downloadSelectedIds.has(bid.id)}
+                                onChange={() => toggleDownloadSelect(bid.id)}
+                                className="w-4 h-4 accent-emerald-600 cursor-pointer"
+                              />
+                            </td>
                             <td className="px-5 py-4 w-14">
                               <div className="flex flex-col items-center gap-2">
                                 <button
@@ -1773,7 +1924,7 @@ export default function App() {
                           </tr>
                           {isExpanded && (
                             <tr className="bg-slate-50/90 border-b border-slate-100">
-                              <td colSpan={4} className="px-5 py-4 text-left">
+                              <td colSpan={5} className="px-5 py-4 text-left">
                                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">나라장터 제안요청·추가 첨부 (목록 파일)</div>
                                 {((bid.files) ?? []).length === 0 ? (
                                   <p className="text-xs text-slate-500 font-medium">목록 API에 첨부가 없습니다.</p>
@@ -2466,6 +2617,24 @@ export default function App() {
           <div className="max-w-4xl w-full flex flex-col gap-6 pb-20">
             <div className="flex items-center justify-between mb-2"><div><h2 className="text-2xl font-black text-slate-800 tracking-tight">시스템 환경설정</h2><p className="text-sm font-bold text-slate-400 mt-1">API Key, 검색 키워드, AI 프롬프트를 관리합니다.</p></div><button onClick={saveSettings} className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl text-sm font-black flex items-center gap-2 transition-all shadow-lg shadow-indigo-200"><Save className="w-4 h-4" /> 전체 저장</button></div>
             <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8"><h3 className="text-base font-black text-slate-800 mb-2 flex items-center gap-2"><Key className="w-5 h-5 text-indigo-500" /> Gemini API 설정</h3><p className="text-xs text-slate-500 font-medium mb-5">과업지시서 문서를 요약하기 위해 발급받은 Google Gemini API Key를 입력하세요.</p><div className="relative"><input type="password" placeholder="AIzaSyA..." value={geminiApiKey} onChange={(e) => setGeminiApiKey(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-mono text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all" /></div></div>
+            <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8">
+              <h3 className="text-base font-black text-slate-800 mb-2 flex items-center gap-2"><Download className="w-5 h-5 text-emerald-600" /> 공고 첨부 다운로드 폴더</h3>
+              <p className="text-xs text-slate-500 font-medium mb-5 leading-relaxed">
+                대시보드에서 체크한 공고의 첨부파일을 이 폴더 아래 <b>기관명\공고명</b> 폴더로 나눠 받고, HWP·HWPX는 PDF로 바꾼 뒤 원본을 지웁니다.
+                PC에서 PDF 변환기(local-converter)가 켜져 있어야 합니다. 비워두면 기본 폴더에 저장되고, 이 값은 이 PC의 브라우저에만 저장됩니다.
+              </p>
+              <input
+                type="text"
+                value={downloadFolder}
+                onChange={(e) => updateDownloadFolder(e.target.value)}
+                placeholder={converterDefaultFolder || 'C:\\Users\\사용자\\Downloads\\나라장터공고'}
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-mono text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
+              />
+              <div className="flex items-center gap-3 mt-3">
+                <button type="button" onClick={() => void checkConverter()} className="text-xs font-bold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-lg hover:bg-emerald-100 transition-colors">변환기 연결 확인</button>
+                {converterStatus && <span className="text-xs font-bold text-slate-500">{converterStatus}</span>}
+              </div>
+            </div>
             <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-8">
               <div className="flex items-center justify-between mb-5"><h3 className="text-base font-black text-slate-800 flex items-center gap-2"><Archive className="w-5 h-5 text-indigo-500" /> AI 프롬프트 아카이브</h3><button onClick={addNewPrompt} className="text-xs font-bold text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg hover:bg-indigo-100 transition-colors flex items-center gap-1"><Plus className="w-3.5 h-3.5" /> 새 프롬프트</button></div>
               <p className="text-xs text-slate-500 font-medium mb-5">상황별로 여러 프롬프트를 저장해두고 교체할 수 있습니다.</p>
