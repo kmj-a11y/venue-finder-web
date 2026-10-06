@@ -10,7 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 try {
-    $AppDir = (Resolve-Path $AppDir).Path
+    $AppDir = (Resolve-Path ($AppDir.Trim().Trim('"'))).Path
     $startBat = Join-Path $AppDir 'start.bat'
 
     if (-not (Test-Path $startBat)) {

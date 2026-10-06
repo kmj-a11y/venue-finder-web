@@ -35,6 +35,19 @@ CloudConvert를 쓰지 않으므로 **무료·무제한·품질 100%**.
    - Python 의존성 설치 (`flask`, `pywin32`, `pystray`, `Pillow`)
    - Windows 시작 폴더에 바로가기 등록 (다음 재부팅부터 자동 실행)
 
+## 한컴 보안모듈 (접근 허용 창 생략)
+
+한컴오피스는 외부 프로그램이 파일을 열 때마다 "접근 허용" 창을 띄운다.
+이 창을 없애기 위해 한컴 공식 보안모듈을 쓴다.
+
+- 파일: `FilePathCheckerModuleExample.dll` (이 폴더에 포함)
+- 출처: 한컴디벨로퍼 공식 배포본
+  https://github.com/hancom-io/devcenter-archive/tree/main/hwp-automation (보안모듈(Automation).zip)
+- SHA-256: `9ac5b97c47ac8aed1e8bca27a3eef39411361d8f68c262509f0c40a8f9d21bb6`
+- 등록 위치: `HKCU\Software\HNC\HwpAutomation\Modules`
+  값 이름 `FilePathCheckerModuleExample` (REG_SZ) = DLL 전체 경로
+- `install.bat` 3단계에서 자동 등록. 이 폴더를 옮기면 `install.bat`을 다시 실행해야 한다.
+
 ## 바로 실행 (설치 후)
 
 - `start.bat` 더블클릭 → 트레이 아이콘(파란 배경 + "V")이 작업 표시줄에 나타남
@@ -126,6 +139,24 @@ test.bat "C:\Users\Minjae\Downloads\test-folder"
     {"file": "...\\공고문.hwp", "status": "success", "pdf": "...\\공고문.pdf"},
     {"file": "...\\DRM.hwp", "status": "failed", "error": "..."}
   ]
+}
+```
+
+### `POST /download`
+웹 앱의 "선택 공고 다운로드 + PDF 변환" 버튼이 호출. 체크한 공고의 첨부를 받아
+`저장폴더\기관명\공고명\` 아래에 저장하고, HWP/HWPX는 PDF로 변환한 뒤 원본을 지운다.
+끝나면 저장 폴더를 탐색기로 연다.
+
+- 조달청(`g2b.go.kr`) 주소만 받는다
+- 이미 받은 파일(또는 이미 변환된 PDF)이 있으면 건너뛴다
+- `baseFolder`를 비우면 `%USERPROFILE%\Downloads\나라장터공고`에 저장
+
+요청:
+```json
+{
+  "baseFolder": "C:\\Users\\Minjae\\Downloads\\나라장터공고",
+  "convert": true, "deleteOriginal": true, "openFolder": true,
+  "bids": [{"id": "R26BK...", "org": "서울교통공사", "title": "2026년 ...", "files": [{"name": "공고문.hwp", "url": "https://www.g2b.go.kr/..."}]}]
 }
 ```
 

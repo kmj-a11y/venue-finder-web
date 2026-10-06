@@ -22,7 +22,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [1/2] Installing Python dependencies...
+echo [1/3] Installing Python dependencies...
 python -m pip install --upgrade pip
 python -m pip install -r "%~dp0requirements.txt"
 if errorlevel 1 (
@@ -32,16 +32,26 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo [1/2] Done.
+echo [1/3] Done.
 echo.
 
-echo [2/2] Registering Windows startup shortcut...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0register_startup.ps1" "%~dp0"
+echo [2/3] Registering Windows startup shortcut...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0register_startup.ps1" "%~dp0."
 if errorlevel 1 (
     echo [WARNING] Could not register startup shortcut.
     echo You can still run start.bat manually.
 ) else (
-    echo [2/2] Done.
+    echo [2/3] Done.
+)
+echo.
+
+echo [3/3] Registering Hancom security module (skips file-access dialog)...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0register_security.ps1" "%~dp0."
+if errorlevel 1 (
+    echo [WARNING] Could not register security module.
+    echo Conversion still works, but Hancom will ask for permission each time.
+) else (
+    echo [3/3] Done.
 )
 echo.
 
