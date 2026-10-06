@@ -26,6 +26,50 @@ function isPaymentRequiredError(error: unknown): boolean {
   return /402|payment\s*required|payment_required/i.test(msg);
 }
 
+/** Gemini 호출에서 재시도 가능한 일시 오류인지 판별한다. (503, 429, 5xx, 네트워크 단절) */
+function isRetryableError(error: unknown): boolean {
+  const e = error as {
+    response?: { status?: number };
+    status?: number;
+    statusCode?: number;
+    code?: number | string;
+    message?: string;
+  };
+  const status = e?.response?.status ?? e?.status ?? e?.statusCode;
+  if (status === 503 || status === 429 || status === 500 || status === 502 || status === 504) return true;
+  if (e?.code === 'ECONNRESET' || e?.code === 'ETIMEDOUT' || e?.code === 'EAI_AGAIN') return true;
+  const msg = typeof e?.message === 'string' ? e.message : '';
+  return /503|502|504|UNAVAILABLE|high demand|Service Unavailable|Too Many Requests|rate limit/i.test(msg);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Gemini 호출을 exponential backoff로 자동 재시도한다.
+ * - 결제 에러(402)는 재시도 의미 없어 즉시 throw
+ * - 재시도 불가 에러도 즉시 throw
+ * - 재시도 가능 에러: 2초 → 5초 → 포기 (총 최대 3회 시도)
+ */
+async function retryWithBackoff<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (isPaymentRequiredError(err)) throw err;
+      if (!isRetryableError(err)) throw err;
+      if (attempt === maxAttempts) throw err;
+      const waitMs = attempt === 1 ? 2000 : 5000;
+      console.warn(`[retryWithBackoff] attempt ${attempt} 실패, ${waitMs}ms 후 재시도`);
+      await sleep(waitMs);
+    }
+  }
+  throw lastError;
+}
+
 function normalizeHwpxXmlToMarkdown(xmlContent: string): string {
   // HWPX(= 내부 XML)에서 표/문단 구조를 최대한 보존하기 위해 마크다운 형태로 변환한다.
   return xmlContent
@@ -191,7 +235,7 @@ async function runGeminiGenerate(geminiKey: string, fullPrompt: string): Promise
   try {
     const genAI = new GoogleGenerativeAI(String(geminiKey).trim());
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-    const result = await model.generateContent(fullPrompt);
+    const result = await retryWithBackoff(() => model.generateContent(fullPrompt));
     const text = result.response?.text?.() ?? '';
 
     if (!text || typeof text !== 'string' || text.trim() === '') {
@@ -221,9 +265,11 @@ async function runGeminiGenerateParts(geminiKey: string, parts: GeminiPart[]): P
     const genAI = new GoogleGenerativeAI(String(geminiKey).trim());
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts }],
-    } as any);
+    const result = await retryWithBackoff(() =>
+      model.generateContent({
+        contents: [{ role: 'user', parts }],
+      } as any)
+    );
 
     const text = result.response?.text?.() ?? '';
     if (!text || typeof text !== 'string' || text.trim() === '') {
