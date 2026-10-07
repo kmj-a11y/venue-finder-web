@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import CloudConvert from 'cloudconvert';
+import { AnalyzeError, classifyAnalyzeError } from '@/lib/analyzeErrors';
 
 /** Vercel 서버리스 최대 실행 시간(초). CloudConvert·Gemini 등 장시간 작업 대비 */
 export const maxDuration = 300;
@@ -9,8 +10,6 @@ export const maxDuration = 300;
 export const MAX_DOCUMENT_CHARS = 15_000;
 
 const cloudConvert = new CloudConvert(process.env.CLOUDCONVERT_API_KEY || '');
-
-const PAYMENT_LIMIT_MESSAGE = 'API 무료 한도가 초과되었습니다. API Key를 교체해 주세요.';
 
 function isPaymentRequiredError(error: unknown): boolean {
   const e = error as {
@@ -35,10 +34,12 @@ function isRetryableError(error: unknown): boolean {
     code?: number | string;
     message?: string;
   };
+  const msg = typeof e?.message === 'string' ? e.message : '';
+  // 하루 한도·월 지출 한도·선불 잔액 소진은 몇 초 기다려도 안 풀리므로 재시도하지 않는다.
+  if (/PerDay|per day|spending cap|prepayment/i.test(msg)) return false;
   const status = e?.response?.status ?? e?.status ?? e?.statusCode;
   if (status === 503 || status === 429 || status === 500 || status === 502 || status === 504) return true;
   if (e?.code === 'ECONNRESET' || e?.code === 'ETIMEDOUT' || e?.code === 'EAI_AGAIN') return true;
-  const msg = typeof e?.message === 'string' ? e.message : '';
   return /503|502|504|UNAVAILABLE|high demand|Service Unavailable|Too Many Requests|rate limit/i.test(msg);
 }
 
@@ -163,97 +164,39 @@ function truncateDoc(documentText: string): string {
     : documentText;
 }
 
-function buildPdfMapPhasePrompt(
+type ParsedDoc =
+  | { kind: 'pdf'; fileName: string; pdfBase64: string }
+  | { kind: 'text'; fileName: string; text: string };
+
+/** 첨부 전체를 한 번에 교차 검증하도록 지시하는 프롬프트 (Gemini 1회 호출용) */
+function buildCombinedAnalysisPrompt(
   userPrompt: string,
   bid: Record<string, unknown>,
-  fileName: string
+  docs: ParsedDoc[]
 ): string {
   const metadataBlock = buildMetadataBlock(bid);
+  const fileList = docs.map((d, i) => `${i + 1}. ${d.fileName}`).join('\n');
 
   return `${userPrompt}
 
 ---
-다음은 해당 공고의 메타데이터와, 첨부파일 중 **하나의 PDF 파일**("${fileName}") 자체다.
+다음은 해당 공고의 메타데이터와 첨부파일 ${docs.length}개 전체다. 첨부는 이 프롬프트 뒤에 문서명과 함께 차례로 붙어 있다.
 
-[중요 — Map 단계(PDF)]
-- 공고에는 다른 첨부파일이 더 있을 수 있으나, 지금은 이 PDF 파일("${fileName}")만 읽고 분석해라.
-- PDF 내부의 표/박스/레이아웃을 최대한 보존해 읽고, 사용자가 요청한 형식(예: 1~6번 항목)에 맞춰 이 문서에 근거해 분석하라.
-- 이 문서에만 없고 다른 문서에 있을 수 있는 정보는 '명시되지 않음' 등으로 명확히 표기하라.
+[첨부 목록]
+${fileList}
 
-${metadataBlock}
+[분석 원칙]
+- 모든 첨부를 처음부터 끝까지 읽고 서로 교차 검증해라. 한 문서에 없으면 다른 문서에서 반드시 찾아라.
+- 한 문서에 '명시되지 않음'이어도 다른 문서에 정보가 있으면 있는 정보를 채택해라.
+- 채용 인원은 각 문서에서 찾은 숫자를 논리적으로 합산해서 보여줘라.
+- 면접전형 일정은 흩어진 단서(날짜, 월 등)가 있으면 모두 취합해라.
+- PDF는 표/박스/레이아웃을 최대한 보존해 읽어라.
 
-[첨부 PDF]
-(PDF 파일이 inlineData로 함께 제공된다. 너는 이 PDF 내용을 직접 읽어야 한다.)`;
-}
+[출력 규칙]
+- 서론/인사/제목(### 등) 없이 첫 줄부터 1번 항목으로 시작해라.
+- 각 항목 사이에는 빈 줄을 1~2줄 넣어라.
 
-function buildSingleFileAnalysisPrompt(
-  userPrompt: string,
-  bid: Record<string, unknown>,
-  documentText: string
-): string {
-  const metadataBlock = buildMetadataBlock(bid);
-  const truncatedDoc = truncateDoc(documentText);
-
-  return `${userPrompt}
-
----
-다음은 해당 공고의 메타데이터와 첨부파일에서 추출한 원문 텍스트야. 이 내용을 모두 반영해서 분석해 줘.
-
-${metadataBlock}
-
-[문서 원문 추출 텍스트]
-${truncatedDoc}`;
-}
-
-function buildMapPhasePrompt(
-  userPrompt: string,
-  bid: Record<string, unknown>,
-  fileName: string,
-  documentText: string
-): string {
-  const metadataBlock = buildMetadataBlock(bid);
-  const truncatedDoc = truncateDoc(documentText);
-  const labeled = `[문서명: ${fileName}]\n${truncatedDoc}`;
-
-  return `${userPrompt}
-
----
-다음은 해당 공고의 메타데이터와, 첨부파일 중 **하나의 파일**에서만 추출한 원문 텍스트다.
-
-[중요 — Map 단계]
-- 공고에는 다른 첨부파일이 더 있을 수 있으나, 지금은 이 파일("${fileName}")의 내용만 본다.
-- 사용자가 요청한 형식(예: 1~6번 항목)에 맞춰 이 문서에 근거해 분석하라.
-- 이 문서에만 없고 다른 문서에 있을 수 있는 정보는 '명시되지 않음' 등으로 명확히 표기하라.
-
-${metadataBlock}
-
-[문서 원문 추출 텍스트 — 단일 파일]
-${labeled}`;
-}
-
-async function runGeminiGenerate(geminiKey: string, fullPrompt: string): Promise<string> {
-  try {
-    const genAI = new GoogleGenerativeAI(String(geminiKey).trim());
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-    const result = await retryWithBackoff(() => model.generateContent(fullPrompt));
-    const text = result.response?.text?.() ?? '';
-
-    if (!text || typeof text !== 'string' || text.trim() === '') {
-      throw new Error('Gemini 응답에서 요약 텍스트를 찾을 수 없습니다.');
-    }
-
-    return text.trim();
-  } catch (error: any) {
-    console.error('Gemini SDK Error Detail:', error, error?.cause);
-    const baseMsg =
-      error instanceof Error ? error.message : String(error ?? '알 수 없는 오류');
-    const causeMsg =
-      typeof error?.cause?.message === 'string'
-        ? error.cause.message
-        : '';
-    const combined = causeMsg || baseMsg || '알 수 없는 네트워크/SDK 오류입니다.';
-    throw new Error(`Gemini 통신 에러: ${combined}`);
-  }
+${metadataBlock}`;
 }
 
 type GeminiPart =
@@ -278,25 +221,9 @@ async function runGeminiGenerateParts(geminiKey: string, parts: GeminiPart[]): P
     return text.trim();
   } catch (error: any) {
     console.error('Gemini SDK Error Detail:', error, error?.cause);
-    const baseMsg =
-      error instanceof Error ? error.message : String(error ?? '알 수 없는 오류');
-    const causeMsg =
-      typeof error?.cause?.message === 'string'
-        ? error.cause.message
-        : '';
-    const combined = causeMsg || baseMsg || '알 수 없는 네트워크/SDK 오류입니다.';
-    throw new Error(`Gemini 통신 에러: ${combined}`);
+    // 원문 에러(상태 코드 포함)가 남아 있을 때 분류해야 정확하다.
+    throw new AnalyzeError(classifyAnalyzeError(error));
   }
-}
-
-async function callGeminiWithDocument(
-  geminiKey: string,
-  prompt: string,
-  bid: Record<string, unknown>,
-  documentText: string
-): Promise<string> {
-  const fullPrompt = buildSingleFileAnalysisPrompt(prompt, bid, documentText);
-  return runGeminiGenerate(geminiKey, fullPrompt);
 }
 
 export async function POST(request: Request) {
@@ -326,10 +253,6 @@ export async function POST(request: Request) {
     } catch {
       throw new Error('bid JSON 파싱에 실패했습니다.');
     }
-
-    type ParsedDoc =
-      | { kind: 'pdf'; fileName: string; pdfBase64: string }
-      | { kind: 'text'; fileName: string; text: string };
 
     const parsedDocs: ParsedDoc[] = [];
 
@@ -389,65 +312,18 @@ export async function POST(request: Request) {
     const key = String(geminiKey);
     const userPrompt = String(prompt);
 
-    let summary = '';
-
-    // Map-Reduce 유지:
-    // - 파일이 1개면 단일 호출로 비용/시간 절감
-    // - 파일이 2개 이상이면 개별 분석(Map) 후 종합(Reduce)
-    if (parsedDocs.length === 1) {
-      const only = parsedDocs[0];
-      if (only.kind === 'pdf') {
-        const mapPrompt = buildPdfMapPhasePrompt(userPrompt, bid, only.fileName);
-        summary = await runGeminiGenerateParts(key, [
-          { text: mapPrompt },
-          { inlineData: { mimeType: 'application/pdf', data: only.pdfBase64 } },
-        ]);
+    // 첨부가 몇 개든 Gemini는 한 번만 호출한다.
+    // (무료 한도가 '하루 요청 수' 기준이라, 파일별로 나눠 부르면 공고 몇 건에 한도가 바닥난다)
+    const parts: GeminiPart[] = [{ text: buildCombinedAnalysisPrompt(userPrompt, bid, parsedDocs) }];
+    for (const doc of parsedDocs) {
+      if (doc.kind === 'pdf') {
+        parts.push({ text: `[첨부 PDF: ${doc.fileName}]` });
+        parts.push({ inlineData: { mimeType: 'application/pdf', data: doc.pdfBase64 } });
       } else {
-        const docBody = `[문서명: ${only.fileName}]\n${only.text}`;
-        summary = await callGeminiWithDocument(key, userPrompt, bid, docBody);
+        parts.push({ text: `[첨부 문서: ${doc.fileName}]\n${truncateDoc(doc.text)}` });
       }
-    } else {
-      const mapResults: string[] = [];
-
-      // 429 방지를 위해 순차 처리 + 2초 쿨타임
-      for (const [i, doc] of parsedDocs.entries()) {
-        if (i > 0) {
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-        }
-
-        if (doc.kind === 'pdf') {
-          const mapPrompt = buildPdfMapPhasePrompt(userPrompt, bid, doc.fileName);
-          mapResults.push(
-            await runGeminiGenerateParts(key, [
-              { text: mapPrompt },
-              { inlineData: { mimeType: 'application/pdf', data: doc.pdfBase64 } },
-            ])
-          );
-        } else {
-          const mapPrompt = buildMapPhasePrompt(userPrompt, bid, doc.fileName, doc.text);
-          mapResults.push(await runGeminiGenerate(key, mapPrompt));
-        }
-      }
-
-      const combinedIntermediate = mapResults
-        .map((result, i) => `--- 문서 ${i + 1} 분석 결과 ---\n${result}`)
-        .join('\n\n');
-
-      // Reduce 단계는 1차 결과 텍스트들을 종합하는 "텍스트" 호출
-      const reducePrompt = `${userPrompt}
-
----
-너는 공공기관 입찰 분석 수석 컨설턴트야. 제공된 텍스트는 여러 첨부파일을 개별적으로 1차 분석한 결과물들이다. 이 결과들을 꼼꼼히 교차 검증해서, 누락된 정보 없이 완벽한 하나의 1~6번 항목으로 종합해라. 한 문서에서 '명시되지 않음'으로 나왔더라도 다른 문서에 정보가 있다면 무조건 있는 정보를 채택해라. 채용 인원의 경우 각 문서에서 찾은 숫자를 논리적으로 합산해서 보여줘. 3번 면접전형 일정은 흩어진 단서(날짜, 월 등)가 있다면 모두 취합해.
-
-[출력 규칙]
-- 서론/인사/제목(### 등) 없이 첫 줄부터 1번 항목으로 시작해라.
-- 1~6번 각 항목 사이에는 빈 줄을 1~2줄 넣어라.
-
-[개별 문서별 1차 분석 결과]
-${combinedIntermediate}`;
-
-      summary = await runGeminiGenerate(key, reducePrompt);
     }
+    const summary = await runGeminiGenerateParts(key, parts);
 
     const bidId = String(bid.id ?? '');
     if (bidId) {
@@ -468,16 +344,12 @@ ${combinedIntermediate}`;
     return NextResponse.json({ bid: updatedBid });
   } catch (error) {
     console.error('analyze API error:', error);
-    if (isPaymentRequiredError(error)) {
-      return NextResponse.json({ error: PAYMENT_LIMIT_MESSAGE }, { status: 402 });
-    }
-    const message =
-      error instanceof Error
-        ? error.message
-        : '파일 분석 중 알 수 없는 오류가 발생했습니다.';
-    const isGeminiError = typeof message === 'string' && message.startsWith('Gemini 통신 에러');
-    const status = isGeminiError ? 500 : 400;
-    return NextResponse.json({ error: message }, { status });
+    // 원인별로 분류해 화면이 '분류 · 설명 · 해결 방법'으로 보여줄 수 있게 돌려준다.
+    const failure = classifyAnalyzeError(error);
+    return NextResponse.json(
+      { error: `${failure.category}: ${failure.message}`, failure },
+      { status: failure.httpStatus }
+    );
   }
 }
 
