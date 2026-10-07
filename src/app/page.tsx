@@ -7,6 +7,12 @@ import {
   FileText, Trophy, Activity, Settings, Plus, X, Save, BarChart3,
   Key, Archive, Bookmark, BookmarkCheck, CheckCircle2, List, Loader2
 } from 'lucide-react';
+import {
+  classifyHttpFailure,
+  formatFailureSummary,
+  OFFLINE_FAILURE,
+  type AnalyzeFailure,
+} from '@/lib/analyzeErrors';
 
 /** PC에서 도는 HWP→PDF 변환기(local-converter) 주소 */
 const LOCAL_CONVERTER_URL = 'http://127.0.0.1:5555';
@@ -25,6 +31,7 @@ function hasRealSummary(bid: any) {
   const text = String(s);
   if (text.includes('파일 읽기 에러') || text.includes('파일 읽기 실패')) return false;
   if (text.includes('첨부파일 본문을 읽을 수 없으므로')) return false;
+  if (text.startsWith('⚠️ 분석 실패')) return false;
   return true;
 }
 
@@ -1326,14 +1333,37 @@ export default function App() {
       formData.append('files', file);
     });
 
+    // 실패 시 선택한 공고의 '과업 내용 상세정리' 칸에 분류된 실패 문구를 넣는다.
+    const markAnalyzeFailed = (failure: AnalyzeFailure) => {
+      const failSummary = formatFailureSummary(failure);
+      showToast(`분석 실패 · ${failure.category}`);
+      setBids((prev) =>
+        prev.map((b) =>
+          selectedBid && b.id === selectedBid.id ? { ...b, summary: failSummary } : b
+        )
+      );
+      setSelectedBid((prev) =>
+        prev && selectedBid && prev.id === selectedBid.id
+          ? { ...prev, summary: failSummary }
+          : prev
+      );
+    };
+
     setIsAnalyzing(true);
     try {
-      const res = await fetch('/api/analyze', {
-        method: 'POST',
-        body: formData,
-      });
+      let res: Response;
+      try {
+        res = await fetch('/api/analyze', {
+          method: 'POST',
+          body: formData,
+        });
+      } catch (networkErr) {
+        console.error('handleUploadAnalyze network error:', networkErr);
+        markAnalyzeFailed(OFFLINE_FAILURE);
+        return;
+      }
       const rawText = await res.text();
-      let data: { error?: string; bid?: typeof selectedBid } | null = null;
+      let data: { error?: string; failure?: AnalyzeFailure; bid?: typeof selectedBid } | null = null;
       const trimmed = rawText.trim();
       if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
         try {
@@ -1344,36 +1374,9 @@ export default function App() {
       }
 
       if (!res.ok) {
-        const paymentMsg = 'API 무료 한도가 초과되었습니다. API Key를 교체해 주세요.';
-        const timeoutMsg =
-          '서버 처리 시간이 초과되었습니다(504). ' +
-          'CloudConvert(HWP 변환)·Gemini 호출이 길어졌습니다. Vercel Functions 설정에서 Fluid Compute가 켜져 있는지, analyze 라우트의 maxDuration이 충분한지 확인해 주세요.';
-        const gatewayMsg =
-          res.status === 502 || res.status === 503
-            ? '일시적으로 분석 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.'
-            : null;
-        const errMsg =
-          res.status === 402
-            ? paymentMsg
-            : res.status === 504
-              ? timeoutMsg
-              : gatewayMsg ??
-                (typeof data?.error === 'string' && data.error.trim()
-                  ? data.error
-                  : '업로드 기반 AI 분석에 실패했습니다.');
-        const failSummary = `⚠️ 분석 실패: ${errMsg}`;
-        showToast(errMsg);
-        // 선택된 공고 및 리스트 상의 요약을 명시적으로 실패 메시지로 교체
-        setBids((prev) =>
-          prev.map((b) =>
-            selectedBid && b.id === selectedBid.id ? { ...b, summary: failSummary } : b
-          )
-        );
-        setSelectedBid((prev) =>
-          prev && selectedBid && prev.id === selectedBid.id
-            ? { ...prev, summary: failSummary }
-            : prev
-        );
+        // 서버가 원인을 분류해 보냈으면 그대로 쓰고,
+        // 서버까지 못 가고 Vercel에서 막힌 경우(413 용량 초과, 504 시간 초과 등)는 상태 코드로 분류한다.
+        markAnalyzeFailed(data?.failure ?? classifyHttpFailure(res.status));
         return;
       }
       const updatedBid = data?.bid;
