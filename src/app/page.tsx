@@ -236,6 +236,7 @@ export default function App() {
   const [savedBidsData, setSavedBidsData] = useState<any[]>([]);
   const [analyzedBidIds, setAnalyzedBidIds] = useState<Set<string>>(new Set());
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
+  const [isUploadDragOver, setIsUploadDragOver] = useState(false);
   const [summaryModalOpen, setSummaryModalOpen] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -1281,13 +1282,9 @@ export default function App() {
 
   // 펼침(expand) 시에는 무거운 /api/g2b/detail 호출을 하지 않는다.
 
-  const handleUploadFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const added = e.target.files;
-    if (!added || added.length === 0) {
-      e.target.value = '';
-      return;
-    }
-    const list = Array.from(added);
+  /** 파일 선택·끌어다 놓기 공용: .pdf/.hwpx/.hwp만 업로드 목록에 추가 */
+  const addUploadFiles = (list: File[]) => {
+    if (list.length === 0) return;
     const allowed = ['.pdf', '.hwpx', '.hwp'];
     const valid = list.filter((f) => {
       const name = (f.name || '').toLowerCase();
@@ -1295,14 +1292,34 @@ export default function App() {
     });
     if (valid.length === 0) {
       showToast('지원 형식이 아닙니다. .pdf, .hwpx, .hwp 파일만 선택해 주세요.');
-      e.target.value = '';
       return;
     }
     if (valid.length < list.length) {
       showToast('일부만 추가됐습니다. .pdf, .hwpx, .hwp만 분석됩니다.');
     }
     setUploadFiles((prev) => [...prev, ...valid]);
+  };
+
+  const handleUploadFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    addUploadFiles(Array.from(e.target.files ?? []));
     e.target.value = '';
+  };
+
+  const handleUploadDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault(); // 기본 동작(브라우저가 파일을 새 탭으로 여는 것)을 막아야 drop이 동작한다
+    e.dataTransfer.dropEffect = 'copy';
+    if (!isUploadDragOver) setIsUploadDragOver(true);
+  };
+
+  const handleUploadDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    // 상자 안의 글자 위로 지나갈 때 깜빡이지 않도록, 상자 밖으로 나갈 때만 해제
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setIsUploadDragOver(false);
+  };
+
+  const handleUploadDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsUploadDragOver(false);
+    addUploadFiles(Array.from(e.dataTransfer.files ?? []));
   };
 
   const removeUploadFile = (index: number) => {
@@ -2141,6 +2158,31 @@ export default function App() {
                           onChange={handleUploadFileChange}
                           className="block w-full text-[11px] text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-[11px] file:font-bold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
                         />
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => uploadInputRef.current?.click()}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              uploadInputRef.current?.click();
+                            }
+                          }}
+                          onDragOver={handleUploadDragOver}
+                          onDragLeave={handleUploadDragLeave}
+                          onDrop={handleUploadDrop}
+                          className={`flex flex-col items-center justify-center gap-1 rounded-xl border-2 border-dashed px-3 py-5 text-center cursor-pointer transition-colors ${
+                            isUploadDragOver
+                              ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                              : 'border-slate-200 bg-slate-50/60 text-slate-500 hover:border-emerald-300 hover:bg-emerald-50/40'
+                          }`}
+                        >
+                          <Download className={`w-5 h-5 ${isUploadDragOver ? 'text-emerald-600' : 'text-slate-400'}`} />
+                          <span className="text-[11px] font-bold">
+                            {isUploadDragOver ? '여기에 놓으면 추가됩니다' : '파일을 여기로 끌어다 놓으세요'}
+                          </span>
+                          <span className="text-[10px] font-medium text-slate-400">.pdf · .hwpx · .hwp · 여러 개 가능 · 클릭해도 선택할 수 있어요</span>
+                        </div>
                         {uploadFiles.length > 0 && (
                           <ul className="space-y-1.5">
                             {uploadFiles.map((file, idx) => (
